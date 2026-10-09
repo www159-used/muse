@@ -11,6 +11,7 @@ crates/
   muse/           Terminal binary and background application workers
   muse-library/   Storage, imports, backup and restore
   muse-playback/  Playback traits and optional native backend
+  muse-e2e/       Declarative import workflows, runner and synthetic fixtures
 ```
 
 Application messages, help and errors are in English. Imported metadata and Unicode paths are preserved.
@@ -96,6 +97,17 @@ MUSE_SAMPLE_ROOT=~/Music/NetEase cargo test -p muse-library --test local_samples
 ```
 
 The sample folder must directly contain MP3, FLAC and NCM. CI uses generated repository fixtures rather than personal music.
+
+Import workflows have a separate test-only workspace package. English Gherkin stories cover MP3/FLAC imports, multiple tracks, recursive folders, Unicode paths, mixed downloads, local lyrics/artwork and repeated imports. Given / When / Then step definitions use real isolated source files and SQLite through the public library interface. Cucumber discovers `.feature` files and reports each step. Workspace tests and CI include all scenarios.
+
+```sh
+make e2e
+make e2e-list
+make e2e E2E_FILTER=twice
+cargo test -p muse-e2e --locked --test import -- --name twice
+```
+
+See [the E2E guide](crates/muse-e2e/README.md) for the scenarios and their Rust step definitions.
 
 ## Releases
 

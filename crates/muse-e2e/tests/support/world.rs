@@ -1,0 +1,118 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+use muse_library::{ImportReport, Library};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fmt, fs,
+    path::{Component, Path, PathBuf},
+};
+use tempfile::TempDir;
+
+pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+#[derive(cucumber::World)]
+#[world(init = Self::new)]
+pub struct ImportWorld {
+    // Drop the connection before removing its directory on Windows.
+    pub library: Library,
+    pub last_report: Option<ImportReport>,
+    source: PathBuf,
+    originals: BTreeMap<PathBuf, Vec<u8>>,
+    _temporary: TempDir,
+}
+
+impl fmt::Debug for ImportWorld {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImportWorld")
+            .field("source", &self.source)
+            .field("last_report", &self.last_report)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ImportWorld {
+    fn new() -> std::io::Result<Self> {
+        let temporary = TempDir::new()?;
+        let source = temporary.path().join("sources");
+        fs::create_dir(&source)?;
+        Ok(Self {
+            library: Library::open(temporary.path().join("library.muse"))
+                .map_err(std::io::Error::other)?,
+            last_report: None,
+            source,
+            originals: BTreeMap::new(),
+            _temporary: temporary,
+        })
+    }
+
+    pub fn copy_ncm(&mut self, relative: &str, fixture: &str) -> Result<()> {
+        let path = self.source_path(relative)?;
+        if !path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("ncm"))
+        {
+            return Err("the source file must have an NCM extension".into());
+        }
+        self.copy_fixture(relative, fixture)
+    }
+
+    pub fn copy_fixture(&mut self, relative: &str, fixture: &str) -> Result<()> {
+        self.write_source(relative, Self::fixture(fixture)?)
+    }
+
+    pub fn write_source(&mut self, relative: &str, bytes: Vec<u8>) -> Result<()> {
+        let path = self.source_path(relative)?;
+        if path.exists() {
+            return Err(format!("source already exists: {relative}").into());
+        }
+        fs::create_dir_all(path.parent().ok_or("source file has no parent")?)?;
+        fs::write(&path, &bytes)?;
+        self.originals.insert(path, bytes);
+        Ok(())
+    }
+
+    pub fn source_path(&self, relative: &str) -> Result<PathBuf> {
+        safe_path(&self.source, relative)
+    }
+
+    pub fn fixture(name: &str) -> Result<Vec<u8>> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let path = safe_path(&root, name)?.canonicalize()?;
+        if !path.starts_with(root.canonicalize()?) {
+            return Err(format!("fixture escapes its root: {name}").into());
+        }
+        Ok(fs::read(path)?)
+    }
+
+    pub fn check_sources(&self) -> Result<()> {
+        for (path, bytes) in &self.originals {
+            assert_eq!(
+                fs::read(path)?,
+                *bytes,
+                "source changed: {}",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+
+    pub fn report(&self) -> Result<&ImportReport> {
+        self.last_report
+            .as_ref()
+            .ok_or_else(|| "import a folder before checking its result".into())
+    }
+}
+
+fn safe_path(root: &Path, relative: &str) -> Result<PathBuf> {
+    if relative.is_empty()
+        || relative.contains(['\\', ':'])
+        || Path::new(relative)
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+    {
+        return Err(format!("path must stay inside the sandbox: {relative}").into());
+    }
+    Ok(root.join(relative))
+}

@@ -1,0 +1,19 @@
+[package]
+name = "muse-e2e"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Executable import stories with Cucumber step definitions for muse"
+license = "AGPL-3.0-only"
+publish = false
+
+[dev-dependencies]
+cucumber = "0.23.0"
+futures = { version = "0.3", default-features = false, features = ["executor"] }
+muse-library = { path = "../muse-library" }
+tempfile = "3.23"
+
+[[test]]
+name = "import"
+path = "tests/import.rs"
+harness = false

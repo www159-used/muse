@@ -3,15 +3,19 @@
 CARGO ?= cargo
 CARGO_RELEASE_VERSION := 1.1.2
 LEVEL ?= patch
+E2E_FILTER ?=
 LIBRARY ?= ./library.muse
 TARGET ?= $(shell rustc -vV | sed -n 's/^host: //p')
 
-.PHONY: help fmt fmt-check interface-check lint test build release ci run clean reset-library package release-tools release-dry-run release-tag
+.PHONY: help fmt fmt-check interface-check lint test e2e e2e-list build release ci run clean reset-library package release-tools release-dry-run release-tag
 
 help:
 	@printf '%s\n' \
 	  'make ci                         Check formatting, Clippy, tests and release build' \
 	  'make fmt                        Format Rust sources' \
+	  'make e2e                        Run import stories with Cucumber step definitions' \
+	  'make e2e E2E_FILTER=twice        Filter import stories by scenario name' \
+	  'make e2e-list                   List all import scenarios' \
 	  'make build / make release       Build debug / release binary' \
 	  'make run                        Run muse' \
 	  'make reset-library              Delete LIBRARY and its SQLite journals; exit muse first' \
@@ -35,6 +39,12 @@ lint:
 test:
 	$(CARGO) test --workspace --locked --all-targets --all-features
 	$(CARGO) test --workspace --locked --doc --all-features
+
+e2e:
+	$(CARGO) test -p muse-e2e --locked --test import $(if $(strip $(E2E_FILTER)),-- --name "$(E2E_FILTER)")
+
+e2e-list:
+	$(CARGO) test -p muse-e2e --locked --test import -- --list
 
 build:
 	$(CARGO) build --workspace --locked

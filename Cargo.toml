@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/muse", "crates/muse-library", "crates/muse-playback"]
+members = ["crates/muse", "crates/muse-library", "crates/muse-playback", "crates/muse-e2e"]
 default-members = ["crates/muse"]
 resolver = "3"
 

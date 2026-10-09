@@ -24,6 +24,7 @@ context: |
   LICENSE 保存 GNU 官方全文；提供 Makefile、三平台 GitHub Actions 和 cargo-release 配置。
   用户已确认发布 Git 标签和二进制，不发布到 crates.io；GitHub 远端尚未配置。
   NCM-only source selection is confirmed: the application imports NCM files/folders only; stored audio and playback remain MP3/FLAC. General-purpose library entry points remain available to Rust callers.
+  Import stories live in a separate test-only muse-e2e workspace package, using cucumber-rs Given/When/Then step definitions, real temporary files and SQLite through public library interfaces. The user accepted the repeat-import example after removing the previous 39-case corpus, then requested normal scenarios. The current suite covers first MP3/FLAC imports, distinct tracks, recursive folders, Unicode paths, mixed downloads, local lyrics/artwork and repeat deduplication. Every import verifies explicit outcomes, golden owned audio and unchanged sources. Unknown steps fail; production packages have no dependency on the E2E package. Keep stories focused and reuse step definitions.
   当前库默认 ./library.muse，支持 --library；j/k 浏览、:import 导入、Esc 取消输入、:q 或 Ctrl-C 退出。
   Vim-style modes: NORMAL for browsing/controls, COMMAND for colon commands, and INSERT only for ordinary UI text fields (none currently exist); the shortcut footer is removed.
   Import paths offer directories and NCM files with Tab common-prefix completion, a candidate popup and Tab/Shift-Tab cycling, preserving Unicode, quotes, spaces and ~/ paths.
