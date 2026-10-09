@@ -1,0 +1,57 @@
+schema: spec-driven
+context: |
+  项目：muse，一个独立运行、外观与基础操作仿 Neovim 的终端音乐播放器。
+  当前阶段：Rust 工程、音乐库存储、本地导入、终端浏览、手动备份恢复和内置播放后端已建立。
+  用户偏好：第一版尽量简单，后续再增加功能和扩展。
+  所有 package（包括二进制）放在 crates，根目录为纯 workspace；程序帮助、界面和错误用英文，用户数据及路径保持原样。
+  已接受的存储方向：library.muse 使用 SQLite，保存歌曲信息和音频 BLOB；
+  导入后独立于原文件，按内容去重，单曲导入完整提交，保留存储版本号。
+  存储模块提供 import、list、open、remove 四类操作。
+  删除歌曲清理对应音频、附件关联和全部成功导入记录，保留源文件并允许重新导入。
+  已确认第一版来源为本地音频文件或目录，导入入口采用应用内 :import 命令，
+  目录默认递归扫描子目录，优先适配网易云音乐的本地下载目录。
+  导入信息仅来自指定文件与目录中的音频标签、NCM 元数据和关联附件，
+  首版不读取网易云客户端数据库或缓存，不要求安装或运行客户端，也不联网补齐信息。
+  NCM 在导入时解包，库内保存完整 MP3/FLAC，源目录中的 NCM 保留。
+  源文件与库内音频均用 SHA-256 去重并由数据库唯一约束保证，同曲不同字节的版本分别保留。
+  哈希、解包和写入须使用对应的同一份完整内容，源文件变化不得造成哈希与保存内容错配。
+  个别文件导入失败时继续其他文件，库不可继续写入时停止，保留已提交歌曲并汇总结果。
+  新增、重复、失败按音频事务结果统计；附件读取问题作为附加信息，不改变新增或重复分类。
+  已确认使用 Rust 开发；本轮实现选择 Ratatui/Crossterm，不称为此前已单独确认的用户决定。
+  播放作为 workspace 内的 muse-playback 库，默认 feature 只提供标准库接口；
+  native feature 提供 NativePlayback，Symphonia 0.5.5 解码、Rodio 0.22.2 输出，应用默认启用。
+  工程使用 Rust 2024 edition，工具链固定为 1.95.0，许可证为 AGPL-3.0-only，
+  LICENSE 保存 GNU 官方全文；提供 Makefile、三平台 GitHub Actions 和 cargo-release 配置。
+  用户已确认发布 Git 标签和二进制，不发布到 crates.io；GitHub 远端尚未配置。
+  NCM-only source selection is confirmed: the application imports NCM files/folders only; stored audio and playback remain MP3/FLAC. General-purpose library entry points remain available to Rust callers.
+  当前库默认 ./library.muse，支持 --library；j/k 浏览、:import 导入、Esc 取消输入、:q 或 Ctrl-C 退出。
+  Vim-style modes: NORMAL for browsing/controls, COMMAND for colon commands, and INSERT only for ordinary UI text fields (none currently exist); the shortcut footer is removed.
+  Import paths offer directories and NCM files with Tab common-prefix completion, a candidate popup and Tab/Shift-Tab cycling, preserving Unicode, quotes, spaces and ~/ paths.
+  COMMAND-mode Tab also completes registered import/stop/q/quit names; an empty prompt lists commands, cycling never executes, and a unique import match hands off to path completion.
+  Active imports show scanning discovery, file-level progress, added/skipped duplicate/failed counts and current filename in the lower panel; finished jobs restore the final report.
+  已确认保存本地已有且能够关联的歌词和封面，重复导入可补齐缺失附件，
+  首版暂不展示附件，本轮按 NCM、嵌入、旁侧文件的顺序每类保存一份主附件，已有内容保留。
+  单文件旁侧查找限于父目录，目录查找限于指定根；导入在独立连接运行，一次一个任务，退出等待单曲提交或回滚。
+  已接入 Enter 播放、Space 暂停恢复、左右 10 秒定位、:stop、进度和退出停止；自然曲终保留当前歌曲停止。
+  NativePlayback 实现先准备后替换，加载失败保留正常旧来源，故障持续报告；成功 load 或 stop 重建恢复。
+  NativePlayback 使用后台控制和解码线程、有限 PCM 缓冲、实际输出音乐帧计时，旧会话不能影响新来源。
+  已声明 SeekTarget 和第六个 seek 方法，覆盖绝对时间及执行时的相对移动，返回实际落点。
+  定位的边界、成功状态及失败约定已实现；自动检查消费真实解码 PCM，物理设备检查单独记录在 native-playback。
+  Linux 构建需 libasound2-dev/pkg-config，运行需要 ALSA；三平台 CI 覆盖标准库接口及 native 构建。
+  当前采用 rusqlite/rusqlite_migration 初始化第 1 版结构，检查库身份并拒绝更高版本。
+  library-backup 提供手动一致备份和恢复：SQLite Online Backup API 固定已提交快照，完成校验后发布独立单文件。
+  --backup 与 --restore 无需交互终端，--library 指定源库或新库目标；不覆盖已有目标或同名日志，不创建缺失来源。
+  自动升级前备份的命名、保留策略和触发范围仍待首个历史迁移确定。
+  暂不引入独立队列、歌单、账号、插件系统或后台守护进程。
+rules:
+  proposal:
+    - 新文档使用英文，保留 OpenSpec 要求的结构标题；已有讨论记录可保持原语言。
+    - 明确区分已确认方向、候选方案与待讨论问题，不把建议写成用户决定。
+    - 控制 MVP 范围，避免提前加入扩展功能。
+  specs:
+    - 新规格使用英文，保留 Requirement、Scenario、SHALL、WHEN、THEN 等规范标记。
+    - 用可观察的行为和场景描述需求；未决定的行为放在设计文档的 Open Questions。
+  design:
+    - 标注决策状态，集中维护待讨论问题。
+  tasks:
+    - 根据讨论后的范围拆分工作，不因接入 OpenSpec 而自动开始实现。

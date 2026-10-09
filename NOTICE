@@ -1,0 +1,8 @@
+muse is licensed under AGPL-3.0-only; see LICENSE.
+
+The original Rust NCM reader uses the format and cryptographic transformations
+documented by taurusxin/ncmdump 1.5.1 as a reference:
+https://github.com/taurusxin/ncmdump/blob/1.5.1/src/ncmcrypt.cpp
+
+The reference project's unmodified MIT notice is included in
+licenses/ncmdump-MIT.txt. muse does not link or distribute ncmdump or TagLib.

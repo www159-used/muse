@@ -1,0 +1,9 @@
+/target/
+/dist/
+/.codex/skills/
+__pycache__/
+*.pyc
+.DS_Store
+*.muse
+*.muse-shm
+*.muse-wal
