@@ -309,3 +309,73 @@ fn library_queries_do_not_create_or_start_services_and_ambiguous_play_is_read_on
     success(cli(&session.directory, &["play", &id.to_string()]));
     assert!(session.status().contains(&format!("Track: {id}")));
 }
+
+#[test]
+fn playlist_commands_play_next_and_cycle_mode() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let path = directory.path().join("library.muse");
+    let mut library = muse_library::Library::open(&path).unwrap();
+    let mp3 = directory.path().join("song.mp3");
+    let flac = directory.path().join("song.flac");
+    fs::write(
+        &mp3,
+        include_bytes!("../../muse-library/tests/fixtures/silence.mp3"),
+    )
+    .unwrap();
+    fs::write(
+        &flac,
+        include_bytes!("../../muse-library/tests/fixtures/tone.flac"),
+    )
+    .unwrap();
+    assert_eq!(library.import(&mp3).imported, 1);
+    assert_eq!(library.import(&flac).imported, 1);
+    let ids: Vec<_> = library
+        .list()
+        .unwrap()
+        .into_iter()
+        .map(|track| track.id)
+        .collect();
+    drop(library);
+    let mut child = support::launch(&directory, &path);
+    struct Stop<'a>(&'a mut std::process::Child);
+    impl Drop for Stop<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let _stop = Stop(&mut child);
+    support::wait_ready(&directory);
+    let listed = success(cli(&directory, &["playlist", "list"]));
+    assert!(listed.contains("全部本地"));
+    assert!(listed.contains("all-local"));
+    success(cli(&directory, &["playlist", "create", "Night", "Drive"]));
+    success(cli(
+        &directory,
+        &["playlist", "add", "Night Drive", &ids[1].to_string()],
+    ));
+    success(cli(
+        &directory,
+        &["playlist", "add", "Night Drive", &ids[0].to_string()],
+    ));
+    let played = success(cli(&directory, &["playlist", "play", "Night Drive"]));
+    assert!(played.contains("Playback command completed"));
+    let status = success(cli(&directory, &["status"]));
+    assert!(status.contains("Playlist: Night Drive"));
+    assert!(status.contains("Mode: sequential"));
+    assert!(status.contains(&format!("Track: {}", ids[1])));
+    assert!(status.contains("Index: 1/2"));
+    success(cli(&directory, &["next"]));
+    let advanced = success(cli(&directory, &["status"]));
+    assert!(advanced.contains(&format!("Track: {}", ids[0])));
+    assert!(advanced.contains("Index: 2/2"));
+    assert!(!cli(&directory, &["next"]).status.success());
+    assert!(success(cli(&directory, &["status"])).contains(&format!("Track: {}", ids[0])));
+    success(cli(&directory, &["mode"]));
+    assert!(success(cli(&directory, &["status"])).contains("Mode: list loop"));
+    success(cli(&directory, &["mode", "single"]));
+    assert!(success(cli(&directory, &["status"])).contains("Mode: single loop"));
+    success(cli(&directory, &["mode", "sequential"]));
+    assert!(success(cli(&directory, &["status"])).contains("Mode: sequential"));
+    success(cli(&directory, &["shutdown"]));
+}

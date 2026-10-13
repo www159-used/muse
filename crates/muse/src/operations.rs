@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use crate::service;
-use muse_library::{Library, SongGroup, Track};
+use muse_library::{Library, PlaylistKind, SCHEMA_VERSION, SongGroup, Track};
 use serde_json::json;
 use std::{ffi::OsString, path::Path, sync::atomic::AtomicBool};
 
-pub const HELP: &str = "list [--search text] [--candidates] [--json]\nshow <candidate-id|g:anchor> [--json]\nimport <file-or-folder>\nplay [candidate-id|g:anchor] | pause | stop | status | shutdown\nlibrary info | library upgrade\nhelp | quit (q) | detach\nCandidate IDs are stable; g: tokens identify current browsing groups.\nMultiple candidates require selection. Quit stops playback; detach keeps it.";
+pub const HELP: &str = "list [--search text] [--candidates] [--json]\nshow <candidate-id|g:anchor> [--json]\nimport <file-or-folder>\nplaylist list | playlist create <name> | playlist add <playlist> <track-id> | playlist play <playlist>\nplay [candidate-id|g:anchor] | next | mode [sequential|list|single] | pause | stop | status | shutdown\nlibrary info | library upgrade\nhelp | quit (q) | detach\nPlayback stays inside the current playlist. The default playlist is 全部本地.\nCandidate IDs are stable; g: tokens identify current browsing groups.\nMultiple candidates require selection. Quit stops playback; detach keeps it.";
 
 #[derive(Default)]
 pub struct CommandOutput {
@@ -128,20 +128,122 @@ pub fn execute(path: &Path, args: &[OsString]) -> Result<CommandOutput, String> 
             }
             Ok(match Library::upgrade(path).map_err(|e| e.to_string())? {
                 Some(backup) => format!(
-                    "Upgraded to version 2. Pre-upgrade backup: {}",
+                    "Upgraded to version {SCHEMA_VERSION}. Pre-upgrade backup: {}",
                     backup.display()
                 ),
-                None => "Library is already version 2".into(),
+                None => format!("Library is already version {SCHEMA_VERSION}"),
             }
             .into())
         }
         "library" if rest == [OsString::from("info")] => {
             let lib = Library::open_existing(path).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_string_pretty(&json!({"descriptor":lib.descriptor().map_err(|e|e.to_string())?,"schema_version":2})).map_err(|e|e.to_string())?.into())
+            Ok(serde_json::to_string_pretty(&json!({"descriptor":lib.descriptor().map_err(|e|e.to_string())?,"schema_version":lib.schema_version().map_err(|e|e.to_string())?})).map_err(|e|e.to_string())?.into())
         }
+        "playlist" => playlist_command(path, rest),
         "list" | "show" => query(path, name, rest),
         _ => Err(format!("invalid command or arguments: {name}; use help")),
     }
+}
+
+fn playlist_command(path: &Path, args: &[OsString]) -> Result<CommandOutput, String> {
+    let mut args = args.iter();
+    let sub = args
+        .next()
+        .and_then(|arg| arg.to_str())
+        .ok_or("playlist requires list, create, add, or play")?;
+    match sub {
+        "list" if args.next().is_none() => {
+            let library = Library::open_existing(path).map_err(|error| error.to_string())?;
+            let lines = library
+                .playlists()
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|playlist| {
+                    let kind = match playlist.kind {
+                        PlaylistKind::AllLocal => "all-local",
+                        PlaylistKind::User => "user",
+                    };
+                    format!(
+                        "{}\t{}\t{}\t{} tracks",
+                        playlist.id, playlist.name, kind, playlist.len
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(lines.into())
+        }
+        "create" => {
+            let name = args.map(|arg| arg.to_string_lossy()).collect::<Vec<_>>();
+            if name.is_empty() {
+                return Err("playlist create requires a name".into());
+            }
+            let mut library = Library::open(path).map_err(|error| error.to_string())?;
+            let playlist = library
+                .create_playlist(&name.join(" "))
+                .map_err(|error| error.to_string())?;
+            Ok(format!("Created playlist {} ({})", playlist.name, playlist.id).into())
+        }
+        "add" => {
+            let playlist = args
+                .next()
+                .and_then(|arg| arg.to_str())
+                .ok_or("playlist add requires a playlist and a track ID")?;
+            let track = args
+                .next()
+                .and_then(|arg| arg.to_str())
+                .ok_or("playlist add requires a track ID")?;
+            if args.next().is_some() {
+                return Err("playlist add accepts a playlist and a track ID".into());
+            }
+            let track_id = track
+                .parse::<i64>()
+                .ok()
+                .filter(|id| *id > 0)
+                .ok_or("playlist add requires a positive track ID")?;
+            let mut library = Library::open(path).map_err(|error| error.to_string())?;
+            let playlist_id = resolve_playlist(&library, playlist)?;
+            let added = library
+                .add_to_playlist(playlist_id, track_id)
+                .map_err(|error| error.to_string())?;
+            Ok(if added {
+                format!("Added track {track_id} to playlist {playlist_id}")
+            } else {
+                format!("Track {track_id} is already in playlist {playlist_id}")
+            }
+            .into())
+        }
+        "play" => {
+            let playlist = args
+                .next()
+                .and_then(|arg| arg.to_str())
+                .ok_or("playlist play requires a playlist")?;
+            if args.next().is_some() {
+                return Err("playlist play accepts one playlist".into());
+            }
+            let playlist_id = {
+                let library = Library::open_existing(path).map_err(|error| error.to_string())?;
+                resolve_playlist(&library, playlist)?
+            };
+            service::control_text(path, service::Command::PlayPlaylist(playlist_id)).map(Into::into)
+        }
+        _ => Err("playlist requires list, create, add, or play".into()),
+    }
+}
+
+pub fn resolve_playlist(library: &Library, token: &str) -> Result<i64, String> {
+    if let Ok(id) = token.parse::<i64>() {
+        return library
+            .playlist(id)
+            .map(|playlist| playlist.id)
+            .map_err(|error| error.to_string());
+    }
+    library
+        .playlists()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|playlist| playlist.name == token)
+        .map(|playlist| playlist.id)
+        .ok_or_else(|| format!("playlist {token} does not exist"))
 }
 
 fn query(path: &Path, name: &str, args: &[OsString]) -> Result<CommandOutput, String> {
