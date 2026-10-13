@@ -1010,23 +1010,23 @@ impl App {
     }
 
     fn volume_command(&mut self, rest: &str) {
-        let args: Vec<std::ffi::OsString> = rest.split_whitespace().map(Into::into).collect();
-        match crate::operations::volume(&self.library_path, &args) {
-            Ok(output) => {
-                if let Some(percent) = output
-                    .text
-                    .lines()
-                    .next()
-                    .and_then(|line| line.strip_prefix("Volume: "))
-                    .and_then(|line| line.strip_suffix('%'))
-                    .and_then(|line| line.parse().ok())
-                {
-                    self.playback_view.volume = percent;
-                }
-                self.message = output.text.replace('\n', " | ");
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        let command = match crate::volume::parse(&tokens) {
+            Ok(command) => command,
+            Err(error) => {
+                self.message = error;
+                return;
             }
-            Err(error) => self.message = error,
+        };
+        let args: Vec<std::ffi::OsString> = tokens.iter().copied().map(Into::into).collect();
+        let (percent, message) = tui_volume_outcome(
+            command,
+            crate::operations::volume(&self.library_path, &args),
+        );
+        if let Some(percent) = percent {
+            self.playback_view.volume = percent;
         }
+        self.message = message;
     }
 
     fn playlist_command(&mut self, rest: &str) {
@@ -1797,6 +1797,39 @@ impl App {
             .filter(|(_, line)| line.at.is_some_and(|at| at <= position))
             .map(|(index, _)| index)
             .next_back()
+    }
+}
+
+/// TUI success flash. The status bar already shows `vol: N%`, so the message
+/// line must not repeat the CLI `Volume:` / `Gain:` observation.
+fn volume_success_flash(command: crate::volume::VolumeCommand) -> String {
+    match command {
+        crate::volume::VolumeCommand::Query => "ok".into(),
+        crate::volume::VolumeCommand::Set(value) => format!("vol set {value}"),
+        crate::volume::VolumeCommand::Inc(step) => format!("vol inc {step}"),
+        crate::volume::VolumeCommand::Dec(step) => format!("vol dec {step}"),
+    }
+}
+
+fn ui_volume_percent(observation: &str) -> Option<u8> {
+    observation
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("Volume: "))
+        .and_then(|line| line.strip_suffix('%'))
+        .and_then(|line| line.parse().ok())
+}
+
+fn tui_volume_outcome(
+    command: crate::volume::VolumeCommand,
+    result: Result<crate::operations::CommandOutput, String>,
+) -> (Option<u8>, String) {
+    match result {
+        Ok(output) => (
+            ui_volume_percent(&output.text),
+            volume_success_flash(command),
+        ),
+        Err(error) => (None, error),
     }
 }
 
@@ -3218,6 +3251,46 @@ mod tests {
         assert!(text.contains("vol: 100%"));
         assert!(!text.contains("Gain:"));
         assert!(!text.contains("Playing"));
+    }
+
+    #[test]
+    fn tui_volume_success_flash_keeps_volume_on_the_status_bar() {
+        use crate::volume::{VolumeCommand, format_observation};
+
+        let observation = format_observation(50);
+        assert_eq!(observation, "Volume: 50%\nGain: 0.2500");
+        for (command, flash) in [
+            (VolumeCommand::Query, "ok"),
+            (VolumeCommand::Set(50), "vol set 50"),
+            (VolumeCommand::Inc(5), "vol inc 5"),
+            (VolumeCommand::Dec(5), "vol dec 5"),
+        ] {
+            let (percent, message) = tui_volume_outcome(command, Ok(observation.clone().into()));
+            assert_eq!(percent, Some(50));
+            assert_eq!(message, flash);
+            assert!(!message.contains("Volume:"), "{message}");
+            assert!(!message.contains("Gain:"), "{message}");
+        }
+        let clamped =
+            tui_volume_outcome(VolumeCommand::Inc(60), Ok(format_observation(100).into()));
+        assert_eq!(clamped, (Some(100), "vol inc 60".into()));
+        let error = tui_volume_outcome(
+            VolumeCommand::Set(50),
+            Err("volume set 999 is out of range; use an integer from 0 to 100".into()),
+        );
+        assert_eq!(error.0, None);
+        assert!(error.1.contains("out of range"), "{}", error.1);
+
+        let temporary = TempDir::new().unwrap();
+        let mut app = App::new(temporary.path().join("library.muse")).unwrap();
+        let (percent, message) = tui_volume_outcome(VolumeCommand::Set(50), Ok(observation.into()));
+        app.playback_view.volume = percent.unwrap();
+        app.message = message;
+        let rendered = screen(&mut app, 100, 24);
+        assert!(rendered.contains("vol: 50%"), "{rendered}");
+        assert!(rendered.contains("vol set 50"), "{rendered}");
+        assert!(!rendered.contains("Volume:"), "{rendered}");
+        assert!(!rendered.contains("Gain:"), "{rendered}");
     }
 
     #[test]

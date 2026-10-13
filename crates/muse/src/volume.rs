@@ -58,8 +58,9 @@ fn classify(raw: &str) -> Number {
     raw.parse().map(Number::Value).unwrap_or(Number::Huge)
 }
 
-/// Status and `:volume` share this text. `Volume` is the UI scale; `Gain` is
-/// the square-law amplitude from [`muse_playback::perceptual_gain`].
+/// CLI `status` and `volume` share this text. `Volume` is the UI scale; `Gain`
+/// is the square-law amplitude from [`muse_playback::perceptual_gain`]. The TUI
+/// reads the percent for the status bar and does not display this block.
 pub fn format_observation(volume: u8) -> String {
     format!(
         "Volume: {volume}%\nGain: {:.4}",
