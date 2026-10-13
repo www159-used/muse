@@ -451,6 +451,7 @@ dependencies = [
  "crossterm_winapi",
  "derive_more",
  "document-features",
+ "filedescriptor",
  "mio",
  "parking_lot",
  "rustix",
@@ -709,6 +710,17 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+
+[[package]]
+name = "filedescriptor"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e40758ed24c9b2eeb76c35fb0aebc66c626084edd827e07e1552279814c6682d"
+dependencies = [
+ "libc",
+ "thiserror 1.0.69",
+ "winapi",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -1338,10 +1350,16 @@ name = "muse"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "getrandom",
  "muse-library",
  "muse-playback",
  "ratatui",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
  "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1351,6 +1369,8 @@ dependencies = [
  "cucumber",
  "futures",
  "muse-library",
+ "rusqlite",
+ "sha2",
  "tempfile",
 ]
 
@@ -1362,7 +1382,7 @@ dependencies = [
  "base64",
  "lofty",
  "rusqlite",
- "rusqlite_migration",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
@@ -1375,6 +1395,7 @@ name = "muse-playback"
 version = "0.1.0"
 dependencies = [
  "rodio",
+ "rtrb",
  "symphonia",
 ]
 
@@ -1948,6 +1969,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rtrb"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9278fb35b3e730abe136e9b395b5b81b96d06b9f5478a50f0c8430a2237b22de"
+
+[[package]]
 name = "rusqlite"
 version = "0.40.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1960,16 +1987,6 @@ dependencies = [
  "libsqlite3-sys",
  "smallvec",
  "sqlite-wasm-rs",
-]
-
-[[package]]
-name = "rusqlite_migration"
-version = "2.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03451d4dc523c0a96d9e412c574670b3f5f184c3988b77a435876be25477bbd3"
-dependencies = [
- "log",
- "rusqlite",
 ]
 
 [[package]]

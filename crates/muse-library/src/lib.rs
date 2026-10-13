@@ -3,9 +3,12 @@
 //! Owned local music storage. Imports never modify source files.
 
 mod backup;
-mod import;
-mod ncm;
+pub mod netease;
 mod storage;
+mod upgrade;
 
-pub use import::{ImportIssue, ImportPhase, ImportProgress, ImportReport};
-pub use storage::{Attachment, AttachmentKind, Library, LibraryError, Track};
+pub use netease::{ImportIssue, ImportPhase, ImportProgress, ImportReport};
+pub use storage::{
+    Attachment, AttachmentKind, AttachmentObservation, Library, LibraryDescriptor, LibraryError,
+    LibraryKind, SongGroup, SourceObservation, Track,
+};

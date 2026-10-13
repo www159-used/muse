@@ -13,7 +13,7 @@ context: |
   导入信息仅来自指定文件与目录中的音频标签、NCM 元数据和关联附件，
   首版不读取网易云客户端数据库或缓存，不要求安装或运行客户端，也不联网补齐信息。
   NCM 在导入时解包，库内保存完整 MP3/FLAC，源目录中的 NCM 保留。
-  源文件与库内音频均用 SHA-256 去重并由数据库唯一约束保证，同曲不同字节的版本分别保留。
+  Schema v2 separates exact audio blobs from stable candidate IDs. Different encoded audio or conflicting explicit NetEase IDs are retained; same-name matches only group candidates for browsing. Source observations and attachment provenance remain candidate-specific.
   哈希、解包和写入须使用对应的同一份完整内容，源文件变化不得造成哈希与保存内容错配。
   个别文件导入失败时继续其他文件，库不可继续写入时停止，保留已提交歌曲并汇总结果。
   新增、重复、失败按音频事务结果统计；附件读取问题作为附加信息，不改变新增或重复分类。
@@ -23,12 +23,15 @@ context: |
   工程使用 Rust 2024 edition，工具链固定为 1.95.0，许可证为 AGPL-3.0-only，
   LICENSE 保存 GNU 官方全文；提供 Makefile、三平台 GitHub Actions 和 cargo-release 配置。
   用户已确认发布 Git 标签和二进制，不发布到 crates.io；GitHub 远端尚未配置。
-  NCM-only source selection is confirmed: the application imports NCM files/folders only; stored audio and playback remain MP3/FLAC. General-purpose library entry points remain available to Rust callers.
+  Libraries persist a filename-derived name and explicit type (netease initially); unknown types fail. The built-in netease module owns NCM/tags/download selection/local attachment policy and grouping. MP3/FLAC without platform IDs remain valid. Existing import APIs are adapters; API integration, additional providers, dynamic plugin loading and cross-library aggregation remain deferred.
   Import stories live in a separate test-only muse-e2e workspace package, using cucumber-rs Given/When/Then step definitions, real temporary files and SQLite through public library interfaces. The user accepted the repeat-import example after removing the previous 39-case corpus, then requested normal scenarios. The current suite covers first MP3/FLAC imports, distinct tracks, recursive folders, Unicode paths, mixed downloads, local lyrics/artwork and repeat deduplication. Every import verifies explicit outcomes, golden owned audio and unchanged sources. Unknown steps fail; production packages have no dependency on the E2E package. Keep stories focused and reuse step definitions.
   当前库默认 ./library.muse，支持 --library；j/k 浏览、:import 导入、Esc 取消输入、:q 或 Ctrl-C 退出。
-  Vim-style modes: NORMAL for browsing/controls, COMMAND for colon commands, and INSERT only for ordinary UI text fields (none currently exist); the shortcut footer is removed.
-  Import paths offer directories and NCM files with Tab common-prefix completion, a candidate popup and Tab/Shift-Tab cycling, preserving Unicode, quotes, spaces and ~/ paths.
-  COMMAND-mode Tab also completes registered import/stop/q/quit names; an empty prompt lists commands, cycling never executes, and a unique import match hands off to path completion.
+  Vim-style modes: NORMAL for browsing/controls, COMMAND for colon commands and search prompts, and INSERT only for ordinary UI text fields (none currently exist); the shortcut footer is removed.
+  Song rows show absolute line numbers starting at 1. NORMAL supports viewport-aware Ctrl-d/u half paging, Ctrl-f/b and PageDown/PageUp paging with one-row overlap, focused gg/G endpoints, counted j/k and paging, and numbered G or numeric colon jumps such as 23G/:23. Keyboard selection/camera behavior follows agent board: move selection first, keep the viewport while the target is visible, otherwise reveal it with minimal scrolling. Numbered jumps focus the library; positions clamp, sizes adapt to resizing, short lists count existing rows, and incomplete prefixes reset on Esc, unrelated keys or mode/focus changes.
+  In NORMAL, vertical wheel input scrolls the panel body under the pointer by three rows. Song selection follows the camera's actual bounded movement to retain its screen row; both stop when the camera reaches an end. Completed results scroll independently, retaining keyboard focus; command mode, active progress and borders ignore wheel input. Mouse capture is enabled on entry and disabled by terminal restoration.
+  Import paths offer directories and NCM/MP3/FLAC files with Tab common-prefix completion, a candidate popup and Tab/Shift-Tab cycling, preserving Unicode, quotes, spaces and ~/ paths.
+  Colon command prompts support Tab completion of registered import/stop/q/quit names; an empty prompt lists commands, cycling never executes, and a unique import match hands off to path completion.
+  Song search uses / and ? COMMAND prompts, literal Unicode-lowercase matching across titles/artists/albums, incremental preview from the original row, Enter confirmation without playback, Esc restoration of track/camera/focus, and counted wrapping n/N repeats. The full list retains order and absolute numbers; matching rows and query/current/total are shown. Empty prompts repeat the prior query in the new direction, input ignores completion/wheel, and pending/confirmed matches refresh after imports.
   Active imports show scanning discovery, file-level progress, added/skipped duplicate/failed counts and current filename in the lower panel; finished jobs restore the final report.
   已确认保存本地已有且能够关联的歌词和封面，重复导入可补齐缺失附件，
   首版暂不展示附件，本轮按 NCM、嵌入、旁侧文件的顺序每类保存一份主附件，已有内容保留。
@@ -39,11 +42,17 @@ context: |
   已声明 SeekTarget 和第六个 seek 方法，覆盖绝对时间及执行时的相对移动，返回实际落点。
   定位的边界、成功状态及失败约定已实现；自动检查消费真实解码 PCM，物理设备检查单独记录在 native-playback。
   Linux 构建需 libasound2-dev/pkg-config，运行需要 ALSA；三平台 CI 覆盖标准库接口及 native 构建。
-  当前采用 rusqlite/rusqlite_migration 初始化第 1 版结构，检查库身份并拒绝更高版本。
+  当前 schema v2 采用 rusqlite 原子事务；v1 普通打开要求显式 muse library upgrade，拒绝未知类型和更高版本。
   library-backup 提供手动一致备份和恢复：SQLite Online Backup API 固定已提交快照，完成校验后发布独立单文件。
   --backup 与 --restore 无需交互终端，--library 指定源库或新库目标；不覆盖已有目标或同名日志，不创建缺失来源。
-  自动升级前备份的命名、保留策略和触发范围仍待首个历史迁移确定。
-  暂不引入独立队列、歌单、账号、插件系统或后台守护进程。
+  升级须关闭旧客户端和服务，获取独占维护锁，先校验不覆盖的 <library>.pre-v2.<suffix>.muse 备份（包含 WAL），备份不自动删除。保留旧 ID/音频/附件；旧源映射重新导入时解码验证，原文件缺失无法恢复已丢弃音频。备份恢复兼容 v1/v2，不升级来源。
+  暂不引入独立队列、歌单、账号或插件系统。
+  Playback now runs in a local per-user/per-canonical-library service shared by CLI and TUI. :q/:quit/handled Ctrl-C and observed terminal hangup stop the shared session; :detach leaves playback unchanged. Both exit paths cancel remaining imports and finish the current song transaction. Reopening the TUI reconnects without loading again.
+  CLI play [database-track-id], pause, stop, status and shutdown work without a TTY. TUI startup and explicit-ID play can launch the service; missing-session status/stop/shutdown do not initialize a library. The idle service persists until explicit shutdown, with no login registration or persisted playback. Unannounced client loss preserves playback.
+  Local IPC uses authenticated loopback TCP, bounded frames/waits, private runtime records and lifetime OS ownership locks. Runtime defaults to HOME/.muse-sessions on Unix or LOCALAPPDATA/.muse-sessions on Windows; MUSE_RUNTIME_DIR supports isolated sessions. Native audio interfaces remain source-independent; service protocol version 2 rejects older services.
+  CLI list/show/import/library info/library upgrade share operations with muse command, a persistent REPL with history, completion and quoted paths. Read queries never create a library or start a service. JSON goes to stdout, import reports to stderr. REPL quit/Ctrl-C/EOF stop playback; detach preserves it; both cancel imports between transactions.
+  Browsing groups use g:<minimum-candidate-id> tokens; numeric playback IDs remain exact candidates. Same NetEase ID groups first, then real tagged title/artist collisions. TUI and command mode require candidate confirmation for ambiguous groups, with cancellation preserving playback. One-shot ambiguous group play errors with exact IDs. Search matches all alternatives; stale picker membership requires fresh confirmation.
+  TUI metadata refresh uses a separate connection polling data_version about every 500ms, only replacing successful snapshots. Preserve input/search/selection/focus; report failures and retry without blocking rendering. CLI import needs no playback service.
 rules:
   proposal:
     - 新文档使用英文，保留 OpenSpec 要求的结构标题；已有讨论记录可保持原语言。

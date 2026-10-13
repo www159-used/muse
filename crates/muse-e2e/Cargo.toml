@@ -12,6 +12,8 @@ cucumber = "0.23.0"
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 muse-library = { path = "../muse-library" }
 tempfile = "3.23"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+sha2 = "0.10.9"
 
 [[test]]
 name = "import"

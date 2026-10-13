@@ -19,10 +19,9 @@ use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::{Attachment, AttachmentKind, Library, LibraryError};
-use crate::{
-    ncm::{Ncm, decode_metadata},
-    storage::{Metadata, hash},
-};
+mod ncm;
+use self::ncm::{Ncm, decode_metadata};
+use crate::storage::{Metadata, hash, song_identity};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImportIssue {
@@ -34,6 +33,7 @@ pub struct ImportIssue {
 pub struct ImportReport {
     pub imported: usize,
     pub duplicates: usize,
+    pub collisions: usize,
     pub failed: Vec<ImportIssue>,
     pub attachment_issues: Vec<ImportIssue>,
     pub scan_issues: Vec<ImportIssue>,
@@ -64,6 +64,7 @@ pub struct ImportProgress {
     pub processed: usize,
     pub imported: usize,
     pub duplicates: usize,
+    pub collisions: usize,
     pub failed: usize,
     pub attachment_issues: usize,
     pub scan_issues: usize,
@@ -74,6 +75,7 @@ impl ImportProgress {
     fn publish(&mut self, report: &ImportReport, notify: &mut impl FnMut(Self)) {
         self.imported = report.imported;
         self.duplicates = report.duplicates;
+        self.collisions = report.collisions;
         self.failed = report.failed.len();
         self.processed = self.imported + self.duplicates + self.failed;
         self.attachment_issues = report.attachment_issues.len();
@@ -87,23 +89,24 @@ enum FileFailure {
     Library(LibraryError),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum SourceSelection {
     All,
     Ncm,
+    Downloads,
 }
 
 impl SourceSelection {
     fn accepts(self, path: &Path) -> bool {
         match self {
-            Self::All => supported(path),
+            Self::All | Self::Downloads => supported(path),
             Self::Ncm => extension(path) == "ncm",
         }
     }
 
     fn unsupported_reason(self) -> &'static str {
         match self {
-            Self::All => "only MP3, FLAC and NCM are supported",
+            Self::All | Self::Downloads => "only MP3, FLAC and NCM are supported",
             Self::Ncm => "only NCM source files can be imported",
         }
     }
@@ -160,6 +163,18 @@ impl Library {
         self.import_selected(path.as_ref(), cancel, SourceSelection::Ncm, notify)
     }
 
+    /// Imports local NetEase downloads, retaining distinct audio candidates.
+    /// NCM sources are attempted first. Exact content is shared; tagged names
+    /// affect browsing groups only, never audio retention.
+    pub fn import_downloads_with_progress(
+        &mut self,
+        path: impl AsRef<Path>,
+        cancel: &AtomicBool,
+        notify: impl FnMut(ImportProgress),
+    ) -> ImportReport {
+        self.import_selected(path.as_ref(), cancel, SourceSelection::Downloads, notify)
+    }
+
     fn import_selected(
         &mut self,
         path: &Path,
@@ -168,6 +183,13 @@ impl Library {
         mut notify: impl FnMut(ImportProgress),
     ) -> ImportReport {
         let mut report = ImportReport::default();
+        match self.descriptor().map(|descriptor| descriptor.kind) {
+            Ok(crate::LibraryKind::Netease) => {}
+            Err(error) => {
+                report.stopped = Some(error.to_string());
+                return report;
+            }
+        }
         let mut progress = ImportProgress {
             phase: ImportPhase::Scanning,
             discovered: 0,
@@ -175,6 +197,7 @@ impl Library {
             processed: 0,
             imported: 0,
             duplicates: 0,
+            collisions: 0,
             failed: 0,
             attachment_issues: 0,
             scan_issues: 0,
@@ -229,7 +252,7 @@ impl Library {
             progress.publish(report, notify);
             if selection.accepts(&canonical) {
                 let root = canonical.parent().unwrap_or(Path::new("."));
-                self.process_file(&canonical, root, cancel, report, &mut associated);
+                self.process_file(&canonical, root, cancel, report, &mut associated, selection);
             } else {
                 report.failed.push(ImportIssue {
                     path: path.into(),
@@ -286,6 +309,10 @@ impl Library {
         progress.total = Some(audio_files.len());
         progress.current = None;
         progress.publish(report, notify);
+        if selection == SourceSelection::Downloads {
+            // Stable sorting preserves discovery order within each format group.
+            audio_files.sort_by_key(|path| extension(path) != "ncm");
+        }
         for path in audio_files {
             if cancel.load(Ordering::Relaxed) {
                 report.cancelled = true;
@@ -293,8 +320,14 @@ impl Library {
             }
             progress.current = Some(path.clone());
             progress.publish(report, notify);
-            let keep_running =
-                self.process_file(&path, &canonical, cancel, report, &mut associated);
+            let keep_running = self.process_file(
+                &path,
+                &canonical,
+                cancel,
+                report,
+                &mut associated,
+                selection,
+            );
             progress.publish(report, notify);
             if !keep_running {
                 break;
@@ -329,14 +362,24 @@ impl Library {
         cancel: &AtomicBool,
         report: &mut ImportReport,
         associated: &mut HashSet<PathBuf>,
+        selection: SourceSelection,
     ) -> bool {
         if cancel.load(Ordering::Relaxed) {
             report.cancelled = true;
             return false;
         }
-        match self.import_file(path, root, &mut report.attachment_issues, associated) {
-            Ok(true) => report.imported += 1,
-            Ok(false) => report.duplicates += 1,
+        match self.import_file(
+            path,
+            root,
+            &mut report.attachment_issues,
+            associated,
+            selection,
+        ) {
+            Ok((true, collision)) => {
+                report.imported += 1;
+                report.collisions += usize::from(collision);
+            }
+            Ok((false, _)) => report.duplicates += 1,
             Err(FileFailure::Source(reason)) => report.failed.push(ImportIssue {
                 path: path.into(),
                 reason,
@@ -360,13 +403,14 @@ impl Library {
         root: &Path,
         issues: &mut Vec<ImportIssue>,
         associated: &mut HashSet<PathBuf>,
-    ) -> Result<bool, FileFailure> {
+        _selection: SourceSelection,
+    ) -> Result<(bool, bool), FileFailure> {
         // This same owned snapshot supplies both the hash and all decoding/tag reads.
         let input = fs::read(path).map_err(|error| FileFailure::Source(error.to_string()))?;
         let source_hash = hash(&input);
-        let existing = self.source_track(&source_hash)?;
+        let is_ncm = extension(path) == "ncm";
         let mut attachments = Vec::new();
-        let (mut metadata, audio) = if extension(path) == "ncm" {
+        let (mut metadata, audio) = if is_ncm {
             let container = Ncm::parse(&input).map_err(FileFailure::Source)?;
             if let Some(reason) = &container.metadata_error {
                 issues.push(ImportIssue {
@@ -375,25 +419,11 @@ impl Library {
                 });
             }
             add_cover(container.cover, path, &mut attachments, issues);
-            let (mut metadata, audio) = if let Some(track) = &existing {
-                (
-                    Metadata {
-                        title: track.title.clone(),
-                        artist: track.artist.clone(),
-                        album: track.album.clone(),
-                        format: track.format.clone(),
-                        duration_ms: track.duration_ms,
-                        netease_id: track.netease_id,
-                    },
-                    None,
-                )
-            } else {
-                let decoded = container.decode_audio();
-                let (metadata, embedded) =
-                    read_audio(&decoded, path, issues).map_err(FileFailure::Source)?;
-                attachments.extend(embedded);
-                (metadata, Some(decoded))
-            };
+            let decoded = container.decode_audio();
+            let (mut metadata, embedded) =
+                read_audio(&decoded, path, issues).map_err(FileFailure::Source)?;
+            attachments.extend(embedded);
+            let audio = Some(decoded);
             if let Some(value) = &container.metadata {
                 apply_netease_metadata(&mut metadata, value);
                 if let Some(lyrics) = value
@@ -417,15 +447,11 @@ impl Library {
             let (metadata, embedded) =
                 read_audio(&input, path, issues).map_err(FileFailure::Source)?;
             attachments.extend(embedded);
-            (
-                metadata,
-                if existing.is_some() {
-                    None
-                } else {
-                    Some(input)
-                },
-            )
+            (metadata, Some(input))
         };
+        // Filename fallback never supplies grouping evidence.
+        let observed_title = metadata.title.clone();
+        let identity = song_identity(&metadata.title, metadata.artist.as_deref());
         if metadata.title.trim().is_empty() {
             metadata.title = path
                 .file_stem()
@@ -441,16 +467,17 @@ impl Library {
             issues,
             associated,
         );
-        let content_hash = match &existing {
-            Some(track) => track.content_hash.clone(),
-            None => hash(audio.as_deref().ok_or(LibraryError::MissingAudio)?),
-        };
+        let content_hash = hash(audio.as_deref().ok_or(LibraryError::MissingAudio)?);
         Ok(self.store(
             &source_hash,
             &content_hash,
             &metadata,
             audio.as_deref(),
             &attachments,
+            (path, &observed_title),
+            identity
+                .as_ref()
+                .map(|(title, artist)| (title.as_str(), artist.as_str())),
         )?)
     }
 }
@@ -710,6 +737,62 @@ fn sidecar_candidate(path: &Path) -> bool {
                 .is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())))
 }
 
+/// Projects platform songs first, then real-tag name collisions. IDs remain playable.
+impl Library {
+    pub fn groups(&self) -> Result<Vec<crate::SongGroup>, LibraryError> {
+        match self.descriptor()?.kind {
+            crate::LibraryKind::Netease => {}
+        }
+        let snapshot = self.connection.unchecked_transaction()?;
+        let tracks = self.list()?;
+        let mut entries: Vec<Vec<crate::Track>> = Vec::new();
+        for track in tracks {
+            if let Some(entry) = entries
+                .iter_mut()
+                .find(|e| track.netease_id.is_some() && e[0].netease_id == track.netease_id)
+            {
+                entry.push(track);
+            } else {
+                entries.push(vec![track]);
+            }
+        }
+        type Entry = (Option<(String, String)>, Vec<crate::Track>);
+        let mut groups: Vec<Entry> = Vec::new();
+        for entry in entries {
+            let (title, artist): (Option<String>, Option<String>) = snapshot.query_row(
+                "SELECT tagged_title,tagged_artist FROM tracks WHERE id=?1",
+                [entry[0].id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            let key = title.and_then(|t| song_identity(&t, artist.as_deref()));
+            if let Some((_, group)) = groups.iter_mut().find(|(k, _)| key.is_some() && *k == key) {
+                group.extend(entry);
+            } else {
+                groups.push((key, entry));
+            }
+        }
+        let mut result: Vec<_> = groups
+            .into_iter()
+            .map(|(_, mut candidates)| {
+                candidates.sort_by_key(|t| t.id);
+                crate::SongGroup {
+                    token: format!("g:{}", candidates[0].id),
+                    candidates,
+                }
+            })
+            .collect();
+        result.sort_by_key(|g| g.candidates[0].id);
+        snapshot.rollback()?;
+        Ok(result)
+    }
+    pub fn group(&self, token: &str) -> Result<crate::SongGroup, LibraryError> {
+        self.groups()?
+            .into_iter()
+            .find(|g| g.token == token)
+            .ok_or_else(|| LibraryError::GroupNotFound(token.into()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -741,7 +824,7 @@ mod tests {
         let temporary = tempfile::TempDir::new().unwrap();
         let database = temporary.path().join("library.muse");
         let source = temporary.path().join("song.mp3");
-        let original = include_bytes!("../tests/fixtures/silence.mp3");
+        let original = include_bytes!("../../tests/fixtures/silence.mp3");
         fs::write(&source, original).unwrap();
         let mut library = Library::open(&database).unwrap();
         let lock = rusqlite::Connection::open(&database).unwrap();

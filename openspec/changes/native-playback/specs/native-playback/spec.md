@@ -12,9 +12,19 @@ The native feature SHALL expose NativePlayback and standard error types implemen
 
 The backend SHALL bound prefetch; Paused and Ready SHALL not keep decoding the entire track. Pause SHALL retain music position, stop SHALL retain the source at zero, and play after Finished SHALL replay from the beginning. Starvation silence SHALL not advance music position. Confirmed EOF with a drained music queue SHALL report Finished.
 
+An available complete PCM frame SHALL remain readable while another thread inspects playback status or publishes decoded audio. The output callback SHALL NOT take the status mutex or substitute silence solely because another thread holds that mutex.
+
 #### Scenario: Pause, stop and replay
 - **WHEN** playback is paused, stopped or restarted after Finished
 - **THEN** pause retains position, stop returns Ready at zero, and replay begins at the start
+
+#### Scenario: Status inspection during multichannel playback
+- **WHEN** a complete six-channel PCM frame is queued and another thread holds the status mutex
+- **THEN** playback outputs every queued sample in channel order, advances position once per complete frame and reports Finished only after confirmed EOF and queue drainage
+
+#### Scenario: Pause races with a prepared output frame
+- **WHEN** pause completes while the output callback is preparing a frame
+- **THEN** the submitted music position remains fixed until playback resumes and any frame not authorized before pause remains queued
 
 ### Requirement: Time seeking and session isolation
 

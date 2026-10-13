@@ -446,3 +446,20 @@ fn external_symlink_attachments_are_not_read() {
             .is_empty()
     );
 }
+
+#[test]
+fn conflicting_attachment_observations_survive_without_replacing_primary() {
+    let (temporary, mut library) = setup();
+    let source = temporary.path().join("song.mp3");
+    let lyrics = temporary.path().join("song.lrc");
+    fs::write(&source, MP3).unwrap();
+    fs::write(&lyrics, b"first lyrics").unwrap();
+    assert_eq!(library.import(&source).imported, 1);
+    fs::write(&lyrics, b"second lyrics").unwrap();
+    assert_eq!(library.import(&source).duplicates, 1);
+    let id = library.list().unwrap()[0].id;
+    assert_eq!(library.attachments(id).unwrap()[0].data, b"first lyrics");
+    let observations = library.attachment_observations(id).unwrap();
+    assert_eq!(observations.len(), 2);
+    assert!(observations.iter().all(|o| o.attribution == "source"));
+}

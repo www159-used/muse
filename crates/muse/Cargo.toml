@@ -13,6 +13,22 @@ muse-playback = { path = "../muse-playback", features = ["native"] }
 muse-library = { path = "../muse-library" }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 crossterm = "0.29.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10.9"
+getrandom = "0.4.3"
+tempfile = "3.23"
+
+[target.'cfg(unix)'.dependencies]
+# The mio reader in crossterm 0.29 loops on EOF after a terminal disconnects.
+crossterm = { version = "0.29.0", features = ["use-dev-tty"] }
+rustix = { version = "1.1", features = ["event", "process"] }
 
 [dev-dependencies]
 tempfile = "3.23"
+
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "1.1", features = ["event", "pty", "termios"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }

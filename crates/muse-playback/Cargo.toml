@@ -9,8 +9,9 @@ publish = false
 
 [features]
 default = []
-native = ["dep:rodio", "dep:symphonia"]
+native = ["dep:rodio", "dep:rtrb", "dep:symphonia"]
 
 [dependencies]
 rodio = { version = "0.22.2", default-features = false, features = ["playback"], optional = true }
+rtrb = { version = "0.4.0", optional = true }
 symphonia = { version = "0.5.5", default-features = false, features = ["mp3", "flac"], optional = true }

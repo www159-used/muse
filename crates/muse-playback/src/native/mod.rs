@@ -4,7 +4,6 @@ mod decode;
 mod output;
 
 use std::{
-    collections::VecDeque,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -14,12 +13,14 @@ use std::{
     time::Duration,
 };
 
+use rtrb::{Producer, RingBuffer};
+
 use crate::{
     AudioSource, Playback, PlaybackError, PlaybackErrorKind as Kind, PlaybackState, PlaybackStatus,
     SeekTarget,
 };
 use decode::{Decoded, OwnedReader};
-use output::{Buffer, DeviceFault, Output, PcmSource, Session, lock};
+use output::{DeviceFault, Output, PcmSource, Session, Timeline, lock};
 
 struct Shared {
     session: Mutex<Option<Arc<Session>>>,
@@ -41,7 +42,7 @@ impl Shared {
         }
         let session = lock(&self.session).clone();
         match session {
-            Some(session) => lock(&session.buffer).status(),
+            Some(session) => lock(&session.timeline).status(&session),
             None => Ok(PlaybackStatus {
                 state: PlaybackState::Empty,
                 position: Duration::ZERO,
@@ -120,6 +121,7 @@ impl NativePlayback {
                             output,
                             decoded: None,
                             session: None,
+                            pcm: None,
                             shared: worker_shared,
                         }
                         .run(receiver);
@@ -204,6 +206,7 @@ struct Engine {
     output: Output,
     decoded: Option<Decoded>,
     session: Option<Arc<Session>>,
+    pcm: Option<Producer<f32>>,
     shared: Arc<Shared>,
 }
 
@@ -242,27 +245,27 @@ impl Engine {
         self.shared.silence();
         let decoded = self.decoded.as_ref().unwrap();
         let budget = (decoded.rate as usize / 4).max(1) * usize::from(decoded.channels);
-        let session = Arc::new(Session {
-            active: AtomicBool::new(true),
-            buffer: Mutex::new(Buffer {
-                state,
+        let (pcm, consumer) = RingBuffer::new(budget);
+        let session = Arc::new(Session::new(
+            state,
+            Timeline {
                 anchor,
-                frames: 0,
                 rate: decoded.rate,
                 duration: decoded.duration,
-                pcm: VecDeque::with_capacity(budget),
-                eof: decoded.eof,
                 failure: None,
-            }),
-        });
+            },
+            decoded.eof,
+        ));
         self.output.mixer.add(PcmSource::new(
             Arc::clone(&session),
             Arc::clone(&self.output.fault),
+            consumer,
             decoded.channels,
             decoded.rate,
         ));
         *lock(&self.shared.session) = Some(Arc::clone(&session));
         self.session = Some(session);
+        self.pcm = Some(pcm);
         self.fill();
     }
 
@@ -278,7 +281,7 @@ impl Engine {
     fn fail(&self, error: PlaybackError) {
         if let Some(session) = &self.session {
             session.active.store(false, Ordering::Release);
-            lock(&session.buffer).failure = Some(error);
+            lock(&session.timeline).failure = Some(error);
         }
     }
 
@@ -287,27 +290,23 @@ impl Engine {
             self.fail(error);
             return false;
         }
-        let (Some(decoded), Some(session)) = (&mut self.decoded, &self.session) else {
+        let (Some(decoded), Some(session), Some(pcm)) =
+            (&mut self.decoded, &self.session, &mut self.pcm)
+        else {
             return false;
         };
-        let room = {
-            let buffer = lock(&session.buffer);
-            if buffer.failure.is_some()
-                || buffer.state == PlaybackState::Finished
-                || !session.active.load(Ordering::Acquire)
-            {
-                return false;
-            }
-            let budget = (decoded.rate as usize / 4).max(1) * usize::from(decoded.channels);
-            budget.saturating_sub(buffer.pcm.len())
-        };
+        if session.state() == PlaybackState::Finished || !session.active.load(Ordering::Acquire) {
+            return false;
+        }
+        let channels = usize::from(decoded.channels);
+        let room = pcm.slots() / channels * channels;
         if room == 0 || decoded.eof {
             return false;
         }
         if decoded.offset == decoded.pending.len() {
             match decoded.next_block() {
                 Ok(false) => {
-                    lock(&session.buffer).eof = true;
+                    session.eof.store(true, Ordering::Release);
                     return false;
                 }
                 Ok(true) => {}
@@ -318,11 +317,8 @@ impl Engine {
             }
         }
         let count = room.min(decoded.pending.len() - decoded.offset);
-        lock(&session.buffer).pcm.extend(
-            decoded.pending[decoded.offset..decoded.offset + count]
-                .iter()
-                .copied(),
-        );
+        pcm.push_entire_slice(&decoded.pending[decoded.offset..decoded.offset + count])
+            .expect("the decoder is the queue's only producer");
         decoded.offset += count;
         true
     }
@@ -376,13 +372,19 @@ impl Engine {
                 if status.state == PlaybackState::Finished {
                     self.rebuild()?;
                 }
-                lock(&self.session.as_ref().unwrap().buffer).state = PlaybackState::Playing;
+                self.session
+                    .as_ref()
+                    .unwrap()
+                    .set_state(PlaybackState::Playing);
                 Ok(Duration::ZERO)
             }
             Operation::Pause => {
                 let status = self.shared.status()?;
                 if status.state == PlaybackState::Playing {
-                    lock(&self.session.as_ref().unwrap().buffer).state = PlaybackState::Paused;
+                    self.session
+                        .as_ref()
+                        .unwrap()
+                        .set_state(PlaybackState::Paused);
                 }
                 Ok(status.position)
             }

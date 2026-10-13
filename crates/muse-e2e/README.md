@@ -10,10 +10,12 @@ Start with [repeat-import.feature](scenarios/import/repeat-import.feature): impo
 | --- | --- |
 | [First import](scenarios/import/first-import.feature) | One MP3 track, exact audio, artist, album, NetEase ID and embedded cover. |
 | [FLAC import](scenarios/import/flac-import.feature) | One FLAC track with exact unpacked audio, metadata and embedded cover. |
-| [Multiple tracks](scenarios/import/multiple-tracks.feature) | Both distinct MP3 and FLAC audio remain in the library, even with the same title. |
+| [Multiple tracks](scenarios/import/multiple-tracks.feature) | Distinct MP3 and FLAC audio with different artists remain in the library, even with the same title. |
 | [Recursive folders](scenarios/import/recursive-folders.feature) | Songs in separate artist/album folders and a nested disc folder are imported. |
 | [Unicode paths](scenarios/import/unicode-paths.feature) | Chinese/Korean names, spaces and an uppercase `.NCM` extension work. |
-| [Mixed downloads](scenarios/import/mixed-downloads.feature) | Only NCM is selected alongside ordinary MP3 and FLAC files. |
+| [Mixed downloads](scenarios/import/mixed-downloads.feature) | NCM and ordinary MP3/FLAC are all imported. |
+| [Retained alternatives](scenarios/import/metadata-duplicates.feature) | Same title/artist across filenames, encodings, case differences and restarts retains playable alternatives in a browsing group; different artists and missing tags remain separate. |
+| [Legacy recovery](scenarios/import/legacy-recovery.feature) | Explicit backed-up upgrade preserves the legacy ID; reimport recovers suppressed audio once. |
 | [Local attachments](scenarios/import/local-attachments.feature) | Matching local lyrics and a NetEase `meta/track-321.jpg` cover retain their exact bytes. |
 | [Repeat import](scenarios/import/repeat-import.feature) | The second import adds nothing, skips one duplicate and preserves the owned audio. |
 
@@ -40,7 +42,8 @@ The feature describes user actions and observable outcomes. [Cucumber's step att
 | `Given "downloads/song.ncm" is a copy of the NCM fixture "standard.ncm"` | [downloaded_ncm](tests/steps/given.rs) copies the synthetic fixture into the source tree. |
 | `And "downloads/plain.mp3" is a copy of the fixture "tagged.mp3"` | [source_file](tests/steps/given.rs) prepares other audio or artwork files. |
 | `And the text file "downloads/song.lrc" contains:` | [text_file](tests/steps/given.rs) writes the following literal docstring. |
-| `When I import the folder "downloads"` | [import_folder](tests/steps/when.rs) calls the public NCM importer and checks unchanged source bytes. |
+| `When I import the folder "downloads"` | [import_folder](tests/steps/when.rs) calls the public download importer and checks unchanged source bytes. |
+| `When I reopen the library` | [reopen_library](tests/steps/when.rs) replaces the connection with one opened from the same persisted library. |
 | `Then 1 track is added` | [added_tracks](tests/steps/then.rs) checks the latest import report. |
 | `And 1 duplicate is skipped` | [skipped_duplicates](tests/steps/then.rs) checks the duplicate count; singular/plural forms share a function. |
 | `And the import finishes without errors` | [clean_import](tests/steps/then.rs) checks failures, scan/attachment issues, cancellation and stopped imports. |

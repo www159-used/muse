@@ -36,13 +36,22 @@ impl Library {
         source: impl AsRef<Path>,
         destination: impl AsRef<Path>,
     ) -> Result<(), LibraryError> {
-        let source = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let source_path = source.as_ref();
+        if !source_path.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "library does not exist",
+            )
+            .into());
+        }
+        let _ownership = crate::upgrade::ownership(source_path, false)?;
+        let source = Connection::open_with_flags(source_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         source.busy_timeout(Duration::from_secs(5))?;
         copy_to_new(&source, destination.as_ref())
     }
 }
 
-fn copy_to_new(source: &Connection, destination: &Path) -> Result<(), LibraryError> {
+pub(crate) fn copy_to_new(source: &Connection, destination: &Path) -> Result<(), LibraryError> {
     ensure_new_destination(destination)?;
     let snapshot = source.unchecked_transaction()?;
     // Force a read before querying header pragmas or copying pages. The transaction
@@ -125,7 +134,7 @@ fn ensure_new_destination(destination: &Path) -> Result<(), LibraryError> {
     Ok(())
 }
 
-fn check_schema(connection: &Connection) -> Result<(), LibraryError> {
+pub(crate) fn check_schema(connection: &Connection) -> Result<(), LibraryError> {
     let application_id: i64 =
         connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
     if application_id != APPLICATION_ID {
@@ -135,10 +144,17 @@ fn check_schema(connection: &Connection) -> Result<(), LibraryError> {
     if version > SCHEMA_VERSION {
         return Err(LibraryError::NewerSchema(version));
     }
-    if version != SCHEMA_VERSION {
+    if !(1..=SCHEMA_VERSION).contains(&version) {
         return Err(LibraryError::InvalidBackup(format!(
             "unsupported schema version {version}"
         )));
+    }
+    if version == 2 {
+        connection.prepare("SELECT name,kind FROM library_descriptor WHERE singleton=1")?;
+        connection.prepare("SELECT tagged_title,tagged_artist FROM tracks LIMIT 0")?;
+        connection.prepare("SELECT verified FROM import_sources LIMIT 0")?;
+        connection.prepare("SELECT source_hash,path,container,title,artist,album,netease_id,content_hash FROM source_observations LIMIT 0")?;
+        connection.prepare("SELECT track_id,source_hash,kind,content_hash,mime_type,data,attribution FROM attachment_observations LIMIT 0")?;
     }
     for query in [
         "SELECT id, title, artist, album, format, duration_ms, netease_id, content_hash FROM tracks LIMIT 0",
@@ -151,7 +167,7 @@ fn check_schema(connection: &Connection) -> Result<(), LibraryError> {
     Ok(())
 }
 
-fn check_integrity(connection: &Connection) -> Result<(), LibraryError> {
+pub(crate) fn check_integrity(connection: &Connection) -> Result<(), LibraryError> {
     let mut statement = connection.prepare("PRAGMA integrity_check")?;
     let mut rows = statement.query([])?;
     let mut ok = false;

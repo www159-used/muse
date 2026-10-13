@@ -169,3 +169,15 @@ fn audio_format(audio: &str) -> Result<&str> {
         .and_then(|extension| extension.to_str())
         .ok_or_else(|| "audio fixture needs a format extension".into())
 }
+
+#[then(expr = "{int} collision is retained")]
+#[then(expr = "{int} collisions are retained")]
+fn retained_collisions(world: &mut ImportWorld, expected: usize) -> Result<()> {
+    assert_eq!(world.report()?.collisions, expected);
+    Ok(())
+}
+#[then(expr = "the library has {int} browsing group")]
+fn browsing_groups(world: &mut ImportWorld, expected: usize) -> Result<()> {
+    assert_eq!(world.library.groups()?.len(), expected);
+    Ok(())
+}

@@ -18,7 +18,7 @@ help:
 	  'make e2e-list                   List all import scenarios' \
 	  'make build / make release       Build debug / release binary' \
 	  'make run                        Run muse' \
-	  'make reset-library              Delete LIBRARY and its SQLite journals; exit muse first' \
+	  'make reset-library              Delete LIBRARY and its SQLite journals; exit TUIs and shutdown its service first' \
 	  'make package TAG=v0.1.0         Package a release binary for TARGET' \
 	  'make release-tools              Install the pinned cargo-release version' \
 	  'make release-dry-run LEVEL=patch Preview a version release' \

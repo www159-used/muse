@@ -2,7 +2,7 @@ Feature: Import multiple downloads
 
   Scenario: Importing a folder adds each distinct audio file
     Given "downloads/song.ncm" is a copy of the NCM fixture "standard.ncm"
-    And "downloads/lossless.ncm" is a copy of the NCM fixture "flac.ncm"
+    And "downloads/lossless.ncm" is a copy of the NCM fixture "other-artist-flac.ncm"
 
     When I import the folder "downloads"
     Then 2 tracks are added

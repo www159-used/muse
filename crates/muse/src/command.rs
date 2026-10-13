@@ -15,6 +15,7 @@ pub enum CursorMove {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuiltinCommand {
     Import,
+    Detach,
     Quit,
     Stop,
 }
@@ -24,6 +25,7 @@ const COMMANDS: &[(&str, BuiltinCommand)] = &[
     ("q", BuiltinCommand::Quit),
     ("quit", BuiltinCommand::Quit),
     ("stop", BuiltinCommand::Stop),
+    ("detach", BuiltinCommand::Detach),
 ];
 
 impl BuiltinCommand {
@@ -45,6 +47,7 @@ pub struct CommandLine {
     text: String,
     cursor: usize,
     completion: Option<Completion>,
+    repl: bool,
 }
 
 pub struct Candidate {
@@ -71,6 +74,17 @@ struct PathArgument {
 }
 
 impl CommandLine {
+    pub fn for_repl() -> Self {
+        Self {
+            repl: true,
+            ..Self::default()
+        }
+    }
+    pub fn replace(&mut self, text: &str) {
+        self.text = text.into();
+        self.cursor = self.text.len();
+        self.completion = None;
+    }
     pub fn text(&self) -> &str {
         &self.text
     }
@@ -179,10 +193,18 @@ impl CommandLine {
         {
             let name = self.text.trim_start();
             let prefix = self.text[..self.text.len() - name.len()].to_owned();
-            let candidates = COMMANDS
+            let commands: Vec<&str> = if self.repl {
+                vec![
+                    "import", "list", "show", "play", "pause", "stop", "status", "shutdown",
+                    "library", "help", "q", "quit", "detach",
+                ]
+            } else {
+                COMMANDS.iter().map(|(name, _)| *name).collect()
+            };
+            let candidates = commands
                 .iter()
-                .filter(|(command, _)| command.starts_with(name))
-                .map(|(command, _)| Candidate {
+                .filter(|command| command.starts_with(name))
+                .map(|command| Candidate {
                     label: (*command).to_owned(),
                     value: (*command).to_owned(),
                     directory: false,
@@ -314,7 +336,11 @@ fn find_candidates(path: &str, cwd: &Path, home: Option<&Path>) -> io::Result<Ve
         let audio = Path::new(name)
             .extension()
             .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("ncm"));
+            .is_some_and(|extension| {
+                ["ncm", "mp3", "flac"]
+                    .iter()
+                    .any(|format| extension.eq_ignore_ascii_case(format))
+            });
         if !(directory || metadata.is_file() && audio) {
             continue;
         }
@@ -383,6 +409,7 @@ mod tests {
             text: text.to_owned(),
             cursor: text.len(),
             completion: None,
+            repl: false,
         }
     }
 
@@ -413,7 +440,8 @@ mod tests {
         input.complete_in(temporary.path(), None, false).unwrap();
         assert_eq!(input.text(), "import ");
         input.complete_in(temporary.path(), None, false).unwrap();
-        assert_eq!(input.text(), "import track.NCM");
+        assert_eq!(input.text(), "import track.");
+        assert_eq!(input.candidates().len(), 2);
     }
 
     #[test]
@@ -433,14 +461,14 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.label.as_str())
                 .collect::<Vec<_>>(),
-            ["import", "q", "quit", "stop"]
+            ["import", "q", "quit", "stop", "detach"]
         );
         assert_eq!(input.selected(), None);
         for (reverse, expected) in [
             (false, "import"),
             (false, "q"),
             (true, "import"),
-            (true, "stop"),
+            (true, "detach"),
             (false, "import"),
         ] {
             complete(&mut input, reverse);
@@ -461,7 +489,7 @@ mod tests {
         assert!(alias.candidates().is_empty());
         let mut reverse = line("");
         complete(&mut reverse, true);
-        assert_eq!(reverse.text(), "stop");
+        assert_eq!(reverse.text(), "detach");
     }
 
     #[test]
@@ -523,7 +551,8 @@ mod tests {
             format!("import Music{MAIN_SEPARATOR}sub{MAIN_SEPARATOR}")
         );
         input.complete_in(temporary.path(), None, false).unwrap();
-        assert!(input.text().ends_with("tone.NCM"));
+        assert!(input.text().ends_with("tone."));
+        assert_eq!(input.candidates().len(), 3);
         let mut absolute = line(&format!(
             "import {}{MAIN_SEPARATOR}Mu",
             temporary.path().display()
@@ -543,10 +572,10 @@ mod tests {
         let temporary = TempDir::new().unwrap();
         for name in [
             "song_a.ncm",
-            "song_b.NCM",
-            "song_c.ncm",
-            "song_ignored.mp3",
-            "song_ignored.flac",
+            "song_b.MP3",
+            "song_c.FLAC",
+            "song_ignored.ogg",
+            "song_ignored.wav",
         ] {
             fs::write(temporary.path().join(name), []).unwrap();
         }
@@ -556,9 +585,9 @@ mod tests {
         assert_eq!(input.candidates().len(), 3);
         for (reverse, expected) in [
             (false, "song_a.ncm"),
-            (false, "song_b.NCM"),
+            (false, "song_b.MP3"),
             (true, "song_a.ncm"),
-            (true, "song_c.ncm"),
+            (true, "song_c.FLAC"),
             (false, "song_a.ncm"),
         ] {
             input.complete_in(temporary.path(), None, reverse).unwrap();
@@ -571,7 +600,7 @@ mod tests {
         assert_eq!(input.text(), previous);
         let mut reverse = line("import so");
         reverse.complete_in(temporary.path(), None, true).unwrap();
-        assert_eq!(reverse.text(), "import song_c.ncm");
+        assert_eq!(reverse.text(), "import song_c.FLAC");
     }
 
     #[test]

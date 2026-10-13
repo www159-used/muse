@@ -196,7 +196,7 @@ fn foreign_key_failure_after_copy_cleans_temporary_database_and_logs() {
     let connection = Connection::open(&database).unwrap();
     connection
         .execute_batch(
-            "PRAGMA foreign_keys=OFF; INSERT INTO import_sources VALUES ('broken', 999);",
+            "PRAGMA foreign_keys=OFF; INSERT INTO import_sources(source_hash,track_id) VALUES ('broken', 999);",
         )
         .unwrap();
     drop(connection);

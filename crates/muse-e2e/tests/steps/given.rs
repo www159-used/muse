@@ -21,3 +21,8 @@ fn text_file(world: &mut ImportWorld, path: String, step: &Step) -> Result<()> {
         .ok_or("expected a text docstring")?;
     world.write_source(&path, text.as_bytes().to_vec())
 }
+
+#[given(expr = "a legacy library suppressed the source {string} by tagged name")]
+fn legacy_library(world: &mut ImportWorld, source: String) -> Result<()> {
+    world.prepare_legacy(&source)
+}

@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::{
-    collections::VecDeque,
     num::{NonZeroU16, NonZeroU32},
     sync::{
-        Arc, Mutex, MutexGuard, TryLockError,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
 
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Source, mixer::Mixer};
+use rtrb::Consumer;
 
 use crate::{PlaybackError, PlaybackErrorKind as Kind, PlaybackState, PlaybackStatus};
 
@@ -75,27 +75,24 @@ impl Output {
     }
 }
 
-pub(super) struct Buffer {
-    pub state: PlaybackState,
+pub(super) struct Timeline {
     pub anchor: Duration,
-    pub frames: u64,
     pub rate: u32,
     pub duration: Option<Duration>,
-    pub pcm: VecDeque<f32>,
-    pub eof: bool,
     pub failure: Option<PlaybackError>,
 }
 
-impl Buffer {
-    pub fn status(&self) -> Result<PlaybackStatus, PlaybackError> {
+impl Timeline {
+    pub fn status(&self, session: &Session) -> Result<PlaybackStatus, PlaybackError> {
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
+        let (state, frames) = session.snapshot();
         let position = self.anchor.saturating_add(Duration::from_secs_f64(
-            self.frames as f64 / f64::from(self.rate),
+            frames as f64 / f64::from(self.rate),
         ));
         Ok(PlaybackStatus {
-            state: self.state,
+            state,
             position: self
                 .duration
                 .map_or(position, |duration| position.min(duration)),
@@ -106,12 +103,79 @@ impl Buffer {
 
 pub(super) struct Session {
     pub active: AtomicBool,
-    pub buffer: Mutex<Buffer>,
+    pub eof: AtomicBool,
+    pub timeline: Mutex<Timeline>,
+    // State and submitted frames change together, so pausing cannot race with
+    // an in-flight frame and allow position to advance after pause completes.
+    transport: AtomicU64,
+}
+
+const STATE_MASK: u64 = 7;
+const FRAME_STEP: u64 = STATE_MASK + 1;
+
+impl Session {
+    pub fn new(state: PlaybackState, timeline: Timeline, eof: bool) -> Self {
+        Self {
+            active: AtomicBool::new(true),
+            eof: AtomicBool::new(eof),
+            timeline: Mutex::new(timeline),
+            transport: AtomicU64::new(state as u64),
+        }
+    }
+
+    pub fn snapshot(&self) -> (PlaybackState, u64) {
+        let value = self.transport.load(Ordering::Acquire);
+        let state = match value & STATE_MASK {
+            value if value == PlaybackState::Ready as u64 => PlaybackState::Ready,
+            value if value == PlaybackState::Playing as u64 => PlaybackState::Playing,
+            value if value == PlaybackState::Paused as u64 => PlaybackState::Paused,
+            value if value == PlaybackState::Finished as u64 => PlaybackState::Finished,
+            _ => PlaybackState::Empty,
+        };
+        (state, value / FRAME_STEP)
+    }
+
+    pub fn state(&self) -> PlaybackState {
+        self.snapshot().0
+    }
+
+    pub fn set_state(&self, state: PlaybackState) {
+        let _ = self
+            .transport
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                Some((value & !STATE_MASK) | state as u64)
+            });
+    }
+
+    fn advance_frame(&self) -> bool {
+        self.transport
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                if value & STATE_MASK == PlaybackState::Playing as u64 {
+                    value.checked_add(FRAME_STEP)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+    }
+
+    fn finish(&self) -> bool {
+        self.transport
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                if value & STATE_MASK == PlaybackState::Playing as u64 {
+                    Some((value & !STATE_MASK) | PlaybackState::Finished as u64)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+    }
 }
 
 pub(super) struct PcmSource {
     session: Arc<Session>,
     device_fault: Arc<DeviceFault>,
+    pcm: Consumer<f32>,
     channels: NonZeroU16,
     rate: NonZeroU32,
     frame: Vec<f32>,
@@ -119,10 +183,17 @@ pub(super) struct PcmSource {
 }
 
 impl PcmSource {
-    pub fn new(session: Arc<Session>, fault: Arc<DeviceFault>, channels: u16, rate: u32) -> Self {
+    pub fn new(
+        session: Arc<Session>,
+        fault: Arc<DeviceFault>,
+        pcm: Consumer<f32>,
+        channels: u16,
+        rate: u32,
+    ) -> Self {
         Self {
             session,
             device_fault: fault,
+            pcm,
             channels: NonZeroU16::new(channels).unwrap(),
             rate: NonZeroU32::new(rate).unwrap(),
             frame: vec![0.0; usize::from(channels)],
@@ -142,27 +213,23 @@ impl Iterator for PcmSource {
         }
         if self.index == self.frame.len() {
             self.frame.fill(0.0);
-            match self.session.buffer.try_lock() {
-                Ok(mut buffer) => {
-                    if buffer.failure.is_some() {
-                        return None;
-                    }
-                    if buffer.state == PlaybackState::Playing {
-                        if buffer.pcm.len() >= self.frame.len() {
-                            for sample in &mut self.frame {
-                                *sample = buffer.pcm.pop_front().unwrap();
+            match self.session.state() {
+                PlaybackState::Playing => {
+                    // Observe EOF before checking the queue: its release store
+                    // follows the final publication of complete audio frames.
+                    let eof = self.session.eof.load(Ordering::Acquire);
+                    if let Ok(chunk) = self.pcm.read_chunk(self.frame.len()) {
+                        if self.session.advance_frame() {
+                            for (sample, value) in self.frame.iter_mut().zip(chunk) {
+                                *sample = value;
                             }
-                            buffer.frames = buffer.frames.saturating_add(1);
-                        } else if buffer.eof {
-                            buffer.state = PlaybackState::Finished;
-                            return None;
                         }
-                    } else if buffer.state == PlaybackState::Finished {
+                    } else if eof && self.session.finish() {
                         return None;
                     }
                 }
-                Err(TryLockError::WouldBlock) => {}
-                Err(TryLockError::Poisoned(_)) => return None,
+                PlaybackState::Finished => return None,
+                _ => {}
             }
             self.index = 0;
         }

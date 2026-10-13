@@ -18,6 +18,7 @@ pub struct ImportWorld {
     pub library: Library,
     pub last_report: Option<ImportReport>,
     source: PathBuf,
+    legacy_path: Option<PathBuf>,
     originals: BTreeMap<PathBuf, Vec<u8>>,
     _temporary: TempDir,
 }
@@ -41,6 +42,7 @@ impl ImportWorld {
             library: Library::open(temporary.path().join("library.muse"))
                 .map_err(std::io::Error::other)?,
             last_report: None,
+            legacy_path: None,
             source,
             originals: BTreeMap::new(),
             _temporary: temporary,
@@ -75,6 +77,46 @@ impl ImportWorld {
 
     pub fn source_path(&self, relative: &str) -> Result<PathBuf> {
         safe_path(&self.source, relative)
+    }
+
+    pub fn reopen_library(&mut self) -> Result<()> {
+        self.library = Library::open(
+            self.legacy_path
+                .clone()
+                .unwrap_or_else(|| self._temporary.path().join("library.muse")),
+        )?;
+        Ok(())
+    }
+
+    pub fn prepare_legacy(&mut self, source: &str) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        let path = self._temporary.path().join("legacy.muse");
+        let db = rusqlite::Connection::open(&path)?;
+        db.execute_batch(include_str!("../../../muse-library/src/schema.sql"))?;
+        db.execute_batch("PRAGMA user_version=1; PRAGMA journal_mode=WAL;")?;
+        let audio = Self::fixture("same-song.mp3")?;
+        let hash = format!("{:x}", Sha256::digest(&audio));
+        db.execute(
+            "INSERT INTO audio VALUES(?1,?2)",
+            rusqlite::params![hash, audio],
+        )?;
+        db.execute("INSERT INTO tracks VALUES(42,'Fixture NCM','Fixture Artist','Fixture Album','mp3',NULL,NULL,?1)",[hash])?;
+        let source_hash = format!("{:x}", Sha256::digest(fs::read(self.source_path(source)?)?));
+        db.execute("INSERT INTO import_sources VALUES(?1,42)", [source_hash])?;
+        self.legacy_path = Some(path);
+        Ok(())
+    }
+
+    pub fn upgrade_legacy(&mut self) -> Result<()> {
+        let path = self
+            .legacy_path
+            .as_ref()
+            .ok_or("legacy fixture is missing")?;
+        let backup = Library::upgrade(path)?.ok_or("expected schema upgrade")?;
+        assert!(backup.is_file());
+        self.library = Library::open(path)?;
+        assert_eq!(self.library.list()?[0].id, 42);
+        Ok(())
     }
 
     pub fn fixture(name: &str) -> Result<Vec<u8>> {

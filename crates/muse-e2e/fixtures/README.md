@@ -17,8 +17,12 @@ The immutable seeds `standard.ncm`, `silence.mp3`, `tone.flac` and `cover.png` o
 | `no-cover.ncm` | Metadata with ID 321, same MP3, no embedded cover; sidecar fallback |
 | `embedded-lyrics.ncm` | Adds `[00:00]embedded lyrics`; embedded lyric priority |
 | `flac.ncm` | Same title and metadata with the exact `tone.flac` payload |
+| `other-artist-flac.ncm` | Same title, Other Artist and ID 654 with the exact `tone.flac` payload; a separate song |
 | `tagged.mp3` | Golden MP3 plus a 128-byte ID3v1 tag with Changed title |
 | `tagged-audio.ncm` | Same NCM title with `tagged.mp3`; complete-byte identity remains distinct |
+| `same-song.mp3` | Golden MP3 with Fixture NCM/Fixture Artist/Fixture Album in ID3v1 tags |
+| `other-artist.mp3` | Same title with Other Artist; separate tagged bytes |
+| `case-song.mp3` | Lowercase title/artist and a different album; a metadata duplicate with different bytes |
 | `blue.png` | A generated blue 1×1 PNG differing from the standard cover |
 
 `regenerate.py` is an offline fixture-authoring tool using Python 3 and OpenSSL AES-128-ECB. It keeps the seed's encrypted audio key, derives the repeating mask from the fixed known MP3/ciphertext pair, and replaces declared metadata/audio/cover fields. It imports no muse code and is never run by CI. Expected track metadata is written independently in scenario files. Run it from any directory when intentionally editing the corpus:

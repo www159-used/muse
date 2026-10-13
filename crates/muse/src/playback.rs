@@ -20,10 +20,10 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Current {
     pub id: i64,
-    generation: u64,
+    pub generation: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -35,15 +35,18 @@ pub(crate) struct View {
 }
 
 #[derive(Clone, Copy)]
-enum Action {
+pub(crate) enum Action {
     Load(i64),
     Toggle,
+    Play,
+    Pause,
     Seek(SeekTarget),
     Stop,
 }
 struct Request {
     expected: Option<Current>,
     action: Action,
+    reply: Option<mpsc::Sender<Result<View, String>>>,
 }
 
 pub(crate) struct Worker {
@@ -61,9 +64,9 @@ impl Worker {
         })
     }
 
-    fn start_with(
+    pub(crate) fn start_with<P: Playback + Send + 'static>(
         path: PathBuf,
-        open: impl Fn() -> Result<NativePlayback, String> + Send + 'static,
+        open: impl Fn() -> Result<P, String> + Send + 'static,
     ) -> Self {
         let (commands, receiver) = mpsc::sync_channel::<Request>(16);
         let view = Arc::new(Mutex::new(View::default()));
@@ -80,7 +83,7 @@ impl Worker {
                 }
             }
             let _exit = Exit(thread_alive);
-            let mut player: Option<NativePlayback> = None;
+            let mut player: Option<P> = None;
             let mut current = None;
             let mut generation = 0;
             while !thread_quit.load(Ordering::Acquire) {
@@ -109,25 +112,37 @@ impl Worker {
                                 }
                                 player.play().map_err(|error| error.to_string())
                             })(),
-                            action if accepts(request.expected, current) => match player.as_mut() {
-                                Some(player) => match action {
-                                    Action::Toggle => player.status().and_then(|status| {
-                                        if status.state == PlaybackState::Playing {
-                                            player.pause()
-                                        } else {
-                                            player.play()
-                                        }
-                                    }),
-                                    Action::Seek(target) => player.seek(target).map(|_| ()),
-                                    Action::Stop => player.stop(),
-                                    Action::Load(_) => unreachable!(),
+                            action
+                                if matches!(
+                                    action,
+                                    Action::Stop | Action::Play | Action::Pause
+                                ) || accepts(request.expected, current) =>
+                            {
+                                match player.as_mut() {
+                                    Some(player) => match action {
+                                        Action::Play => player.play(),
+                                        Action::Pause => player.pause(),
+                                        Action::Toggle => player.status().and_then(|status| {
+                                            if status.state == PlaybackState::Playing {
+                                                player.pause()
+                                            } else {
+                                                player.play()
+                                            }
+                                        }),
+                                        Action::Seek(target) => player.seek(target).map(|_| ()),
+                                        Action::Stop => player.stop(),
+                                        Action::Load(_) => unreachable!(),
+                                    }
+                                    .map_err(|error| error.to_string()),
+                                    None if matches!(action, Action::Stop | Action::Pause) => {
+                                        Ok(())
+                                    }
+                                    None => Err(
+                                        "no track loaded; press Enter to play the selected track"
+                                            .into(),
+                                    ),
                                 }
-                                .map_err(|error| error.to_string()),
-                                None => {
-                                    Err("no track loaded; press Enter to play the selected track"
-                                        .into())
-                                }
-                            },
+                            }
                             _ => Err("the track changed; ignored a stale playback request".into()),
                         };
                         let mut view = lock(&thread_view);
@@ -135,8 +150,11 @@ impl Worker {
                         if matches!(request.action, Action::Load(_)) {
                             view.pending = None;
                         }
-                        view.error = result.err();
+                        view.error = result.as_ref().err().cloned();
                         update_status(player.as_ref(), &mut view);
+                        if let Some(reply) = request.reply {
+                            let _ = reply.send(result.map(|()| view.clone()));
+                        }
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         let mut view = lock(&thread_view);
@@ -165,6 +183,7 @@ impl Worker {
         view
     }
 
+    #[cfg(test)]
     fn send(&self, action: Action) -> Result<(), String> {
         let mut view = lock(&self.view);
         if let Action::Load(id) = action {
@@ -177,6 +196,7 @@ impl Worker {
         if let Err(error) = self.commands.try_send(Request {
             expected: view.current,
             action,
+            reply: None,
         }) {
             if loading {
                 view.pending = None;
@@ -186,15 +206,46 @@ impl Worker {
         Ok(())
     }
 
+    /// Completion-based service entry point; a session stop is never generation-scoped.
+    pub fn execute(&self, action: Action, expected: Option<Current>) -> Result<View, String> {
+        let (reply, result) = mpsc::channel();
+        {
+            let mut view = lock(&self.view);
+            if let Action::Load(id) = action {
+                if view.pending.is_some() {
+                    return Err("a track is loading; please wait".into());
+                }
+                view.pending = Some(id);
+            }
+            if let Err(error) = self.commands.try_send(Request {
+                expected,
+                action,
+                reply: Some(reply),
+            }) {
+                if matches!(action, Action::Load(_)) {
+                    view.pending = None;
+                }
+                return Err(format!("cannot submit playback operation: {error}"));
+            }
+        }
+        result.recv_timeout(Duration::from_secs(10)).map_err(|_| {
+            "playback outcome unconfirmed; inspect status before retrying".to_string()
+        })?
+    }
+
+    #[cfg(test)]
     pub fn load(&self, id: i64) -> Result<(), String> {
         self.send(Action::Load(id))
     }
+    #[cfg(test)]
     pub fn toggle(&self) -> Result<(), String> {
         self.send(Action::Toggle)
     }
+    #[cfg(test)]
     pub fn seek(&self, target: SeekTarget) -> Result<(), String> {
         self.send(Action::Seek(target))
     }
+    #[cfg(test)]
     pub fn stop(&self) -> Result<(), String> {
         self.send(Action::Stop)
     }
@@ -204,7 +255,7 @@ fn accepts(expected: Option<Current>, current: Option<Current>) -> bool {
     expected == current
 }
 
-fn update_status(player: Option<&NativePlayback>, view: &mut View) {
+fn update_status<P: Playback>(player: Option<&P>, view: &mut View) {
     if let Some(player) = player {
         match player.status() {
             Ok(status) => view.status = Some(status),
@@ -242,7 +293,8 @@ mod tests {
         let mut library = Library::open(&path).unwrap();
         library.import(&song);
         let id = library.list().unwrap()[0].id;
-        let worker = Worker::start_with(path, || Err("injected device failure".into()));
+        let worker =
+            Worker::start_with::<NativePlayback>(path, || Err("injected device failure".into()));
         worker.load(id).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while worker.view().pending.is_some() {
@@ -318,6 +370,7 @@ mod tests {
             .try_send(Request {
                 expected: old,
                 action: Action::Seek(SeekTarget::Forward(Duration::from_secs(10))),
+                reply: None,
             })
             .unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(3);

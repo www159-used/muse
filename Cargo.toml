@@ -3,6 +3,10 @@ members = ["crates/muse", "crates/muse-library", "crates/muse-playback", "crates
 default-members = ["crates/muse"]
 resolver = "3"
 
+# Keep application debugging while making full-file hashing practical.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

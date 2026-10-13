@@ -67,11 +67,27 @@ write_variant("changed-types.ncm", {
     "album": ["unsupported shape"], "musicId": "321", "duration": "12345",
 })
 write_variant("flac.ncm", standard_metadata, audio=(ROOT / "tone.flac").read_bytes())
+write_variant("other-artist-flac.ncm", {
+    **standard_metadata, "artist": [["Other Artist", 34]], "musicId": 654,
+}, audio=(ROOT / "tone.flac").read_bytes())
 id3v1 = b"TAG" + b"Changed title".ljust(30, b"\0") + b"\0" * 95
 assert len(id3v1) == 128
 tagged = mp3 + id3v1
 (ROOT / "tagged.mp3").write_bytes(tagged)
 write_variant("tagged-audio.ncm", standard_metadata, audio=tagged)
+
+
+def tagged_song(title, artist, album="Fixture Album"):
+    fields = [value.encode("ascii") for value in (title, artist, album)]
+    assert all(len(value) <= 30 for value in fields)
+    tag = b"TAG" + b"".join(value.ljust(30, b"\0") for value in fields) + b"\0" * 35
+    assert len(tag) == 128
+    return mp3 + tag
+
+
+(ROOT / "same-song.mp3").write_bytes(tagged_song("Fixture NCM", "Fixture Artist"))
+(ROOT / "other-artist.mp3").write_bytes(tagged_song("Fixture NCM", "Other Artist"))
+(ROOT / "case-song.mp3").write_bytes(tagged_song("fixture ncm", "fixture artist", "New tags"))
 
 
 def png_chunk(kind, data):
@@ -83,4 +99,4 @@ blue += png_chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0))
 blue += png_chunk(b"IDAT", zlib.compress(b"\x00\x00\x00\xff\xff"))
 blue += png_chunk(b"IEND", b"")
 (ROOT / "blue.png").write_bytes(blue)
-print("Regenerated eight synthetic NCM variants, one tagged MP3 and one PNG fixture.")
+print("Regenerated synthetic NCM variants, tagged MP3 files and the PNG fixture.")

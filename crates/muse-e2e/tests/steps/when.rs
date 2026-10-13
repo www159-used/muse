@@ -10,10 +10,20 @@ fn import_folder(world: &mut ImportWorld, folder: String) -> Result<()> {
     if !path.is_dir() {
         return Err(format!("download folder does not exist: {folder}").into());
     }
-    world.last_report = Some(world.library.import_ncm_with_progress(
+    world.last_report = Some(world.library.import_downloads_with_progress(
         &path,
         &AtomicBool::new(false),
         |_| {},
     ));
     world.check_sources()
+}
+
+#[when("I reopen the library")]
+fn reopen_library(world: &mut ImportWorld) -> Result<()> {
+    world.reopen_library()
+}
+
+#[when("I explicitly upgrade the legacy library")]
+fn upgrade_legacy(world: &mut ImportWorld) -> Result<()> {
+    world.upgrade_legacy()
 }

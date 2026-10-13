@@ -10,6 +10,90 @@ use std::{
 const MP3: &[u8] = include_bytes!("../../../muse-library/tests/fixtures/silence.mp3");
 const FLAC: &[u8] = include_bytes!("../../../muse-library/tests/fixtures/tone.flac");
 
+#[test]
+fn prepared_surround_audio_survives_status_lock_contention() {
+    let expected = [0.25, -0.25, 0.5, -0.5, 0.75, -0.75];
+    let session = Arc::new(Session::new(
+        PlaybackState::Playing,
+        Timeline {
+            anchor: Duration::ZERO,
+            rate: 44_100,
+            duration: None,
+            failure: None,
+        },
+        true,
+    ));
+    let (mut producer, consumer) = RingBuffer::new(expected.len());
+    producer.push_entire_slice(&expected).unwrap();
+    let mut source = PcmSource::new(
+        Arc::clone(&session),
+        Arc::new(DeviceFault::default()),
+        consumer,
+        6,
+        44_100,
+    );
+    let guard = lock(&session.timeline);
+    let actual = std::array::from_fn::<_, 6, _>(|_| source.next().unwrap());
+    drop(guard);
+    assert_eq!(
+        actual, expected,
+        "prepared PCM must not be replaced with silence while another thread reads playback status"
+    );
+    assert_eq!(session.snapshot().1, 1);
+    assert!(source.next().is_none());
+    assert_eq!(session.state(), PlaybackState::Finished);
+}
+
+#[test]
+fn concurrent_pause_freezes_submitted_audio_position() {
+    let session = Arc::new(Session::new(
+        PlaybackState::Playing,
+        Timeline {
+            anchor: Duration::ZERO,
+            rate: 44_100,
+            duration: None,
+            failure: None,
+        },
+        false,
+    ));
+    let (mut producer, consumer) = RingBuffer::new(1_000_000);
+    producer.push_entire_slice(&vec![0.25; 1_000_000]).unwrap();
+    let mut source = PcmSource::new(
+        Arc::clone(&session),
+        Arc::new(DeviceFault::default()),
+        consumer,
+        1,
+        44_100,
+    );
+    let done = AtomicBool::new(false);
+    let changed = thread::scope(|scope| {
+        scope.spawn(|| {
+            while !done.load(Ordering::Acquire) {
+                source.next();
+            }
+        });
+        let mut changed = None;
+        for _ in 0..10_000 {
+            session.set_state(PlaybackState::Playing);
+            thread::yield_now();
+            session.set_state(PlaybackState::Paused);
+            let before = lock(&session.timeline).status(&session).unwrap().position;
+            thread::yield_now();
+            let after = lock(&session.timeline).status(&session).unwrap().position;
+            if after != before {
+                changed = Some((before, after));
+                break;
+            }
+        }
+        done.store(true, Ordering::Release);
+        changed
+    });
+    assert_eq!(
+        changed, None,
+        "a completed pause must freeze the submitted music position"
+    );
+}
+
 fn wait(mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(3);
     while !ready() {
@@ -129,13 +213,25 @@ fn bounded_preload_bad_candidate_and_playing_seek() {
         Kind::NoSource
     );
     player.load(Box::new(Cursor::new(FLAC.to_vec()))).unwrap();
-    wait(|| {
-        let session = lock(&player.shared.session).clone().unwrap();
-        lock(&session.buffer).pcm.len() >= 44_100 / 4
-    });
-    thread::sleep(Duration::from_millis(20));
-    let session = lock(&player.shared.session).clone().unwrap();
-    assert!(lock(&session.buffer).pcm.len() <= 44_100 / 4);
+    let (output, _samples) = Output::offline();
+    let mut engine = Engine {
+        output,
+        decoded: None,
+        session: None,
+        pcm: None,
+        shared: Arc::new(Shared {
+            session: Mutex::new(None),
+            device: Mutex::new(Arc::new(DeviceFault::default())),
+            alive: AtomicBool::new(true),
+        }),
+    };
+    engine
+        .control(Operation::Load(Box::new(Cursor::new(FLAC.to_vec()))))
+        .unwrap();
+    while engine.fill() {}
+    let pcm = engine.pcm.as_ref().unwrap();
+    assert_eq!(pcm.slots(), 0);
+    assert_eq!(pcm.buffer().capacity(), 44_100 / 4);
     assert_eq!(player.status().unwrap().position, Duration::ZERO);
     player.play().unwrap();
     assert!(
