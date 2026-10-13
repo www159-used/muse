@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 pub const TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_FRAME: usize = 64 * 1024;
 
@@ -29,6 +29,9 @@ pub enum Command {
     Seek { direction: i8, millis: u64 },
     Stop,
     Shutdown,
+    SetVolume(u8),
+    IncVolume(u32),
+    DecVolume(u32),
 }
 
 impl Command {
@@ -54,6 +57,9 @@ impl Command {
                 _ => SeekTarget::Forward(Duration::from_millis(millis)),
             }),
             Self::Stop | Self::Shutdown => Action::Stop,
+            Self::SetVolume(volume) => Action::SetVolume(volume),
+            Self::IncVolume(steps) => Action::IncVolume(steps),
+            Self::DecVolume(steps) => Action::DecVolume(steps),
             Self::Status => return None,
         })
     }
@@ -90,6 +96,7 @@ pub struct Snapshot {
     next_index: Option<u32>,
     #[serde(default)]
     next_track_id: Option<i64>,
+    volume: u8,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -121,6 +128,7 @@ impl From<View> for Snapshot {
             mode: view.mode,
             next_index: view.next_index,
             next_track_id: view.next_track_id,
+            volume: view.volume,
             status: view.status.map(|s| Status {
                 position: s.position,
                 duration: s.duration,
@@ -149,6 +157,7 @@ impl From<Snapshot> for View {
             mode: snapshot.mode,
             next_index: snapshot.next_index,
             next_track_id: snapshot.next_track_id,
+            volume: snapshot.volume,
             status: snapshot.status.map(|s| PlaybackStatus {
                 position: s.position,
                 duration: s.duration,

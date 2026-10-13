@@ -85,6 +85,18 @@ pub struct PlaybackStatus {
     pub duration: Option<Duration>,
 }
 
+/// Maps the linear UI volume scale to a playback amplitude.
+///
+/// `volume` is the stored 0–100 command value. The amplitude multiplier is
+/// `gain = (volume / 100)^2`, so equal UI steps stay closer to equal loudness
+/// than linear amplitude. `0` mutes and `100` is unity gain. Values above 100
+/// are clamped. This scales samples muse submits; it does not change the
+/// operating-system mixer.
+pub fn perceptual_gain(volume: u8) -> f32 {
+    let unit = f32::from(volume.min(100)) / 100.0;
+    unit * unit
+}
+
 /// Controls one loaded audio source, independently of storage and the UI.
 ///
 /// All methods are required and have no default success behavior. The optional
@@ -169,4 +181,12 @@ pub trait Playback {
     /// Playback or seeking to the confirmed end reports `Finished`; playback
     /// errors are returned here if they occur after a control method has succeeded.
     fn status(&self) -> Result<PlaybackStatus, Self::Error>;
+
+    /// Sets application-internal playback gain from the linear UI volume scale.
+    ///
+    /// `volume` uses the same 0–100 scale as the status `Volume:` field. The
+    /// amplitude applied to output is [`perceptual_gain`], not a linear fraction
+    /// of the operating-system volume. The setting survives later loads on this
+    /// player. It does not change the system mixer.
+    fn set_volume(&mut self, volume: u8) -> Result<(), Self::Error>;
 }

@@ -79,6 +79,10 @@ impl Playback for ClockPlayer {
         Ok(status.position)
     }
 
+    fn set_volume(&mut self, _volume: u8) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     fn status(&self) -> Result<PlaybackStatus, Self::Error> {
         let mut status = self.status.unwrap_or(PlaybackStatus {
             state: PlaybackState::Empty,

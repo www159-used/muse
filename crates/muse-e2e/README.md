@@ -23,6 +23,7 @@ Start with [repeat-import.feature](scenarios/import/repeat-import.feature): impo
 | [Repeat modes](scenarios/playlist/repeat-modes.feature) | Cycling mode walks sequential, list loop, and single loop. |
 | [Next track](scenarios/playlist/next-track.feature) | Status shows the upcoming track, including a track in the middle of the playlist; only the last sequential track has no next. Play-next-once stays on 全部本地. |
 | [Import feedback](scenarios/import/import-feedback.feature) | A corrupt file is reported, a fixed file imports on retry, and an empty folder adds nothing. |
+| [Application volume](scenarios/playlist/volume.feature) | `volume set`, `inc`, and `dec` change internal gain, clamp, persist across a service restart, and fail when the service is down. |
 
 Every import checks added/duplicate counts, rejects unexpected failures or issues, verifies library audio against independent fixtures and checks that all prepared source files remain unchanged. Track tables describe the complete library and match each row once without depending on import order.
 

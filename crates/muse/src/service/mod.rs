@@ -8,7 +8,8 @@ use crate::playback::{Current, View, Worker};
 pub(crate) use client::Client;
 pub(crate) use protocol::Command;
 use protocol::{Request, Response, TIMEOUT, VERSION};
-use runtime::{Endpoint, Runtime};
+use runtime::Endpoint;
+pub(crate) use runtime::Runtime;
 use std::{
     fs::{self, TryLockError},
     io,
@@ -166,7 +167,7 @@ pub(crate) fn run(path: &Path) -> Result<(), String> {
 
 pub(crate) fn run_with(
     path: &Path,
-    make_worker: impl FnOnce(&Path) -> Worker,
+    make_worker: impl FnOnce(&Path) -> Result<Worker, String>,
 ) -> Result<(), String> {
     let _library_ownership =
         muse_library::Library::open_existing(path).map_err(|e| e.to_string())?;
@@ -187,7 +188,7 @@ pub(crate) fn run_with(
         }
     }
     let cleanup = Cleanup(runtime.endpoint_path());
-    let worker = make_worker(&runtime.library);
+    let worker = make_worker(&runtime.library)?;
     let running = AtomicBool::new(true);
     let active = AtomicUsize::new(0);
     let controls = Mutex::new(());
@@ -322,14 +323,14 @@ pub(crate) fn control_text(path: &Path, command: Command) -> Result<String, Stri
     };
     let view = remote.call(command, None)?;
     let output = if matches!(command, Command::Status) {
-        format_status(path, &view)
+        format_status(path, &view)?
     } else {
         "Playback command completed".into()
     };
     Ok(output)
 }
 
-pub(crate) fn format_status(path: &Path, view: &crate::playback::View) -> String {
+pub(crate) fn format_status(path: &Path, view: &crate::playback::View) -> Result<String, String> {
     let state = view.status.map_or("Empty", |s| match s.state {
         muse_playback::PlaybackState::Empty => "Empty",
         muse_playback::PlaybackState::Ready => "Stopped",
@@ -348,9 +349,14 @@ pub(crate) fn format_status(path: &Path, view: &crate::playback::View) -> String
     } else {
         view.playlist_name.clone()
     };
+    let volume_file = Runtime::existing(path)?
+        .ok_or_else(|| "library does not exist".to_string())?
+        .settings_path();
     let mut output = format!(
-        "Track: {track}\nState: {state}\nPosition: {position:.3}s\nDuration: {duration}\nPlaylist: {playlist}\nMode: {}",
-        view.mode.label()
+        "Track: {track}\nState: {state}\nPosition: {position:.3}s\nDuration: {duration}\nPlaylist: {playlist}\nMode: {}\n{}\nVolume file: {}",
+        view.mode.label(),
+        crate::volume::format_observation(view.volume),
+        volume_file.display()
     );
     if let Some(index) = view.playlist_index {
         output.push_str(&format!("\nIndex: {}/{}", index + 1, view.playlist_len));
@@ -373,7 +379,7 @@ pub(crate) fn format_status(path: &Path, view: &crate::playback::View) -> String
     if let Some(error) = &view.error {
         output.push_str(&format!("\nPlayback error: {error}"));
     }
-    output
+    Ok(output)
 }
 
 fn resolved_next(view: &crate::playback::View) -> Option<u32> {
@@ -410,6 +416,26 @@ fn track_title(path: &Path, id: i64) -> Option<String> {
         .track(id)
         .ok()
         .map(|track| track.title)
+}
+
+pub(crate) fn volume_text(
+    path: &Path,
+    command: crate::volume::VolumeCommand,
+) -> Result<String, String> {
+    let Some(remote) = Remote::find(path)? else {
+        return Err(
+            "no playback service running; volume commands need a live playback service".into(),
+        );
+    };
+    let view = match command {
+        crate::volume::VolumeCommand::Query => remote.call(Command::Status, None)?,
+        crate::volume::VolumeCommand::Set(volume) => {
+            remote.call(Command::SetVolume(volume), None)?
+        }
+        crate::volume::VolumeCommand::Inc(steps) => remote.call(Command::IncVolume(steps), None)?,
+        crate::volume::VolumeCommand::Dec(steps) => remote.call(Command::DecVolume(steps), None)?,
+    };
+    Ok(crate::volume::format_observation(view.volume))
 }
 
 pub(crate) fn control(path: &Path, command: Command) -> Result<(), String> {
@@ -504,38 +530,33 @@ mod tests {
 
     #[test]
     fn mid_list_sequential_status_names_the_following_position() {
-        let text = format_status(
-            Path::new("/no/such/library.muse"),
-            &playing(113, 168, RepeatMode::Sequential),
-        );
+        let temporary = tempfile::TempDir::new().unwrap();
+        let path = temporary.path().join("library.muse");
+        Library::open(&path).unwrap();
+        let text = format_status(&path, &playing(113, 168, RepeatMode::Sequential)).unwrap();
         assert!(text.contains("Index: 114/168"), "{text}");
         assert!(text.contains("Next: 115/168"), "{text}");
+        assert!(text.contains("Volume:"), "{text}");
+        assert!(text.contains("Gain:"), "{text}");
+        assert!(text.contains("Volume file:"), "{text}");
         assert!(!text.contains("Next: none"), "{text}");
         assert!(!text.contains("Next title:"), "{text}");
 
-        let last = format_status(
-            Path::new("/no/such/library.muse"),
-            &playing(167, 168, RepeatMode::Sequential),
-        );
+        let last = format_status(&path, &playing(167, 168, RepeatMode::Sequential)).unwrap();
         assert!(last.contains("Index: 168/168"), "{last}");
         assert!(last.contains("Next: none"), "{last}");
         assert!(!last.contains("Next title:"), "{last}");
 
-        let wrapped = format_status(
-            Path::new("/no/such/library.muse"),
-            &playing(167, 168, RepeatMode::List),
-        );
+        let wrapped = format_status(&path, &playing(167, 168, RepeatMode::List)).unwrap();
         assert!(wrapped.contains("Next: 1/168"), "{wrapped}");
         assert!(!wrapped.contains("Next: none"), "{wrapped}");
 
-        let repeated = format_status(
-            Path::new("/no/such/library.muse"),
-            &playing(113, 168, RepeatMode::Track),
-        );
+        let repeated = format_status(&path, &playing(113, 168, RepeatMode::Track)).unwrap();
         assert!(repeated.contains("Next: 114/168"), "{repeated}");
         assert!(!repeated.contains("Next: none"), "{repeated}");
 
-        let idle = format_status(Path::new("/no/such/library.muse"), &View::default());
+        let idle = format_status(&path, &View::default()).unwrap();
+        assert!(idle.contains("Volume: 100%"), "{idle}");
         assert!(idle.lines().all(|line| !line.starts_with("Next")));
     }
 
@@ -582,7 +603,7 @@ mod tests {
         });
         view.next_index = None;
         view.next_track_id = None;
-        let text = format_status(&path, &view);
+        let text = format_status(&path, &view).unwrap();
         assert!(text.contains("Index: 2/3"), "{text}");
         assert!(text.contains("Next: 3/3"), "{text}");
         assert!(
@@ -598,7 +619,7 @@ mod tests {
         let mut once = view.clone();
         once.next_index = Some(0);
         once.next_track_id = Some(tracks[0].id);
-        let queued = format_status(&path, &once);
+        let queued = format_status(&path, &once).unwrap();
         assert!(queued.contains("Next: 1/3"), "{queued}");
         assert!(
             queued.contains(&format!("Next title: {}", tracks[0].title)),
@@ -607,7 +628,7 @@ mod tests {
         assert!(!queued.contains("Next: 3/3"), "{queued}");
 
         view.playlist_index = Some(2);
-        let end = format_status(&path, &view);
+        let end = format_status(&path, &view).unwrap();
         assert!(end.contains("Index: 3/3"), "{end}");
         assert!(end.contains("Next: none"), "{end}");
         assert!(!end.contains("Next title:"), "{end}");

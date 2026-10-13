@@ -20,6 +20,7 @@ pub enum BuiltinCommand {
     Stop,
     Playlist,
     NextOnce,
+    Volume,
 }
 
 const COMMANDS: &[(&str, BuiltinCommand)] = &[
@@ -30,6 +31,7 @@ const COMMANDS: &[(&str, BuiltinCommand)] = &[
     ("detach", BuiltinCommand::Detach),
     ("next", BuiltinCommand::NextOnce),
     ("playlist", BuiltinCommand::Playlist),
+    ("volume", BuiltinCommand::Volume),
 ];
 
 impl BuiltinCommand {
@@ -42,7 +44,7 @@ impl BuiltinCommand {
             .iter()
             .find(|(registered, _)| *registered == name)?
             .1;
-        (matches!(command, Self::Import | Self::Playlist) || rest.is_empty())
+        (matches!(command, Self::Import | Self::Playlist | Self::Volume) || rest.is_empty())
             .then_some((command, rest))
     }
 }
@@ -202,6 +204,7 @@ impl CommandLine {
                 vec![
                     "import", "list", "show", "play", "next", "pause", "stop", "status",
                     "shutdown", "mode", "playlist", "library", "help", "q", "quit", "detach",
+                    "volume",
                 ]
             } else {
                 COMMANDS.iter().map(|(name, _)| *name).collect()
@@ -468,14 +471,16 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.label.as_str())
                 .collect::<Vec<_>>(),
-            ["import", "q", "quit", "stop", "detach", "next", "playlist"]
+            [
+                "import", "q", "quit", "stop", "detach", "next", "playlist", "volume",
+            ]
         );
         assert_eq!(input.selected(), None);
         for (reverse, expected) in [
             (false, "import"),
             (false, "q"),
             (true, "import"),
-            (true, "playlist"),
+            (true, "volume"),
             (false, "import"),
         ] {
             complete(&mut input, reverse);
@@ -496,7 +501,7 @@ mod tests {
         assert!(alias.candidates().is_empty());
         let mut reverse = line("");
         complete(&mut reverse, true);
-        assert_eq!(reverse.text(), "playlist");
+        assert_eq!(reverse.text(), "volume");
     }
 
     #[test]

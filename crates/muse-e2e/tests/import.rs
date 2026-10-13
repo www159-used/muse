@@ -6,6 +6,9 @@ mod playback;
 #[allow(dead_code, unused_imports)]
 #[path = "../../muse/src/service/mod.rs"]
 mod service;
+#[allow(dead_code, unused_imports)]
+#[path = "../../muse/src/volume.rs"]
+mod volume;
 
 mod steps;
 mod support;

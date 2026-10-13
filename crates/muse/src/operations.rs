@@ -4,7 +4,7 @@ use muse_library::{Library, PlaylistKind, SCHEMA_VERSION, SongGroup, Track};
 use serde_json::json;
 use std::{ffi::OsString, path::Path, sync::atomic::AtomicBool};
 
-pub const HELP: &str = "list [--search text] [--candidates] [--json]\nshow <candidate-id|g:anchor> [--json]\nimport <file-or-folder>\nplaylist list | playlist create <name> | playlist add <playlist> <track-id> | playlist play <playlist>\nplay [candidate-id|g:anchor] | next | next-once <track-id> | mode [sequential|list|single] | pause | stop | status | shutdown\nlibrary info | library upgrade\nhelp | quit (q) | detach\nPlayback stays inside the current playlist. next-once plays one of its tracks next, then continues that same playlist. The default playlist is 全部本地.\nCandidate IDs are stable; g: tokens identify current browsing groups.\nMultiple candidates require selection. Quit stops playback; detach keeps it.";
+pub const HELP: &str = "list [--search text] [--candidates] [--json]\nshow <candidate-id|g:anchor> [--json]\nimport <file-or-folder>\nplaylist list | playlist create <name> | playlist add <playlist> <track-id> | playlist play <playlist>\nplay [candidate-id|g:anchor] | next | next-once <track-id> | mode [sequential|list|single] | pause | stop | status | shutdown\nvolume | volume set <0-100> | volume inc <steps> | volume dec <steps>\nlibrary info | library upgrade\nhelp | quit (q) | detach\nPlayback stays inside the current playlist. next-once plays one of its tracks next, then continues that same playlist. The default playlist is 全部本地.\nVolume is application gain from 0 to 100 and does not change the system mixer. inc and dec clamp to that range.\nCandidate IDs are stable; g: tokens identify current browsing groups.\nMultiple candidates require selection. Quit stops playback; detach keeps it.";
 
 #[derive(Default)]
 pub struct CommandOutput {
@@ -140,9 +140,22 @@ pub fn execute(path: &Path, args: &[OsString]) -> Result<CommandOutput, String> 
             Ok(serde_json::to_string_pretty(&json!({"descriptor":lib.descriptor().map_err(|e|e.to_string())?,"schema_version":lib.schema_version().map_err(|e|e.to_string())?})).map_err(|e|e.to_string())?.into())
         }
         "playlist" => playlist_command(path, rest),
+        "volume" => volume(path, rest),
         "list" | "show" => query(path, name, rest),
         _ => Err(format!("invalid command or arguments: {name}; use help")),
     }
+}
+
+pub fn volume(path: &Path, args: &[OsString]) -> Result<CommandOutput, String> {
+    let text = args
+        .iter()
+        .map(|arg| {
+            arg.to_str()
+                .ok_or_else(|| "volume arguments must be Unicode".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let command = crate::volume::parse(&text)?;
+    service::volume_text(path, command).map(Into::into)
 }
 
 fn playlist_command(path: &Path, args: &[OsString]) -> Result<CommandOutput, String> {
