@@ -7,7 +7,7 @@ E2E_FILTER ?=
 LIBRARY ?= ./library.muse
 TARGET ?= $(shell rustc -vV | sed -n 's/^host: //p')
 
-.PHONY: help fmt fmt-check interface-check lint test e2e e2e-list build release ci run clean reset-library package release-tools release-dry-run release-tag
+.PHONY: help fmt fmt-check interface-check lint test e2e e2e-list build release ci run clean reset-library upgrade-library package release-tools release-dry-run release-tag
 
 help:
 	@printf '%s\n' \
@@ -19,6 +19,7 @@ help:
 	  'make build / make release       Build debug / release binary' \
 	  'make run                        Run muse' \
 	  'make reset-library              Delete LIBRARY and its SQLite journals; exit TUIs and shutdown its service first' \
+	  'make upgrade-library            Upgrade LIBRARY from v1/v2 to v3 (close clients / old service first)' \
 	  'make package TAG=v0.1.0         Package a release binary for TARGET' \
 	  'make release-tools              Install the pinned cargo-release version' \
 	  'make release-dry-run LEVEL=patch Preview a version release' \
@@ -63,6 +64,9 @@ clean:
 
 reset-library:
 	rm -f -- "$(LIBRARY)" "$(LIBRARY)-wal" "$(LIBRARY)-shm" "$(LIBRARY)-journal"
+
+upgrade-library:
+	$(CARGO) run -p muse --locked -- --library "$(LIBRARY)" library upgrade
 
 package:
 	$(CARGO) build --locked --release --target "$(TARGET)"
