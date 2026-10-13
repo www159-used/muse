@@ -19,6 +19,7 @@ pub struct ImportWorld {
     // Drop the connection before removing its directory on Windows.
     pub library: Library,
     pub last_report: Option<ImportReport>,
+    failed_name: Option<String>,
     source: PathBuf,
     legacy_path: Option<PathBuf>,
     originals: BTreeMap<PathBuf, Vec<u8>>,
@@ -45,6 +46,7 @@ impl ImportWorld {
             library: Library::open(temporary.path().join("library.muse"))
                 .map_err(std::io::Error::other)?,
             last_report: None,
+            failed_name: None,
             legacy_path: None,
             source,
             originals: BTreeMap::new(),
@@ -65,6 +67,93 @@ impl ImportWorld {
 
     pub fn copy_fixture(&mut self, relative: &str, fixture: &str) -> Result<()> {
         self.write_source(relative, Self::fixture(fixture)?)
+    }
+
+    pub fn write_corrupt(&mut self, relative: &str) -> Result<()> {
+        self.write_source(relative, b"muse-corrupt-audio".to_vec())
+    }
+
+    pub fn replace_fixture(&mut self, relative: &str, fixture: &str) -> Result<()> {
+        let path = self.source_path(relative)?;
+        if !path.is_file() {
+            return Err(format!("source does not exist: {relative}").into());
+        }
+        let bytes = Self::fixture(fixture)?;
+        fs::write(&path, &bytes)?;
+        self.originals.insert(path, bytes);
+        Ok(())
+    }
+
+    pub fn empty_folder(&mut self, relative: &str) -> Result<()> {
+        let path = self.source_path(relative)?;
+        if path.exists() {
+            return Err(format!("folder already exists: {relative}").into());
+        }
+        fs::create_dir_all(path)?;
+        Ok(())
+    }
+
+    pub fn fail_import_on(&mut self, relative: &str) -> Result<()> {
+        self.write_corrupt(relative)?;
+        let folder = Path::new(relative)
+            .parent()
+            .and_then(|parent| parent.to_str())
+            .filter(|parent| !parent.is_empty())
+            .ok_or("failed import needs a file inside a folder")?;
+        self.import_folder(folder)?;
+        let name = Path::new(relative)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("failed import needs a file name")?;
+        let failed = self
+            .report()?
+            .failed
+            .iter()
+            .any(|issue| issue.path.file_name().and_then(|file| file.to_str()) == Some(name));
+        if !failed {
+            return Err(format!("import did not fail on {name}").into());
+        }
+        self.failed_name = Some(name.to_owned());
+        Ok(())
+    }
+
+    pub fn import_folder(&mut self, folder: &str) -> Result<()> {
+        let path = self.source_path(folder)?;
+        if !path.is_dir() {
+            return Err(format!("download folder does not exist: {folder}").into());
+        }
+        self.last_report = Some(self.library.import_downloads_with_progress(
+            &path,
+            &std::sync::atomic::AtomicBool::new(false),
+            |_| {},
+        ));
+        self.check_sources()
+    }
+
+    pub fn track_for_fixture(&self, fixture: &str) -> Result<muse_library::Track> {
+        let bytes = Self::fixture(fixture)?;
+        let mut matches = Vec::new();
+        for track in self.library.list()? {
+            if self.library.open_audio(track.id)?.into_inner() == bytes {
+                matches.push(track);
+            }
+        }
+        match matches.len() {
+            1 => Ok(matches.remove(0)),
+            0 => Err(format!("no track stores fixture {fixture}").into()),
+            _ => Err(format!("fixture {fixture} matches multiple tracks").into()),
+        }
+    }
+
+    pub fn queue_fixture_next(&mut self, fixture: &str) -> Result<()> {
+        let id = self.track_for_fixture(fixture)?.id;
+        self.session()?.run(&["next-once", &id.to_string()])
+    }
+
+    pub fn failed_name(&self) -> Result<&str> {
+        self.failed_name
+            .as_deref()
+            .ok_or_else(|| "no previous import failure was recorded".into())
     }
 
     pub fn write_source(&mut self, relative: &str, bytes: Vec<u8>) -> Result<()> {

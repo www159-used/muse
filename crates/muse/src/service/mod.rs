@@ -307,6 +307,7 @@ pub(crate) fn control_text(path: &Path, command: Command) -> Result<String, Stri
         | Command::PlayPlaylist(_)
         | Command::UsePlaylist(_)
         | Command::Next
+        | Command::PlayNextOnce(_)
         | Command::CycleMode
         | Command::SetMode(_) => Some(Remote::attach(path)?),
         _ => Remote::find(path)?,
@@ -347,6 +348,19 @@ pub(crate) fn control_text(path: &Path, command: Command) -> Result<String, Stri
         if let Some(index) = view.playlist_index {
             output.push_str(&format!("\nIndex: {}/{}", index + 1, view.playlist_len));
         }
+        if view.playlist_index.is_some() || view.next_track_id.is_some() {
+            match view.next_index {
+                Some(index) => {
+                    output.push_str(&format!("\nNext: {}/{}", index + 1, view.playlist_len));
+                    if let Some(id) = view.next_track_id
+                        && let Some(title) = track_title(path, id)
+                    {
+                        output.push_str(&format!("\nNext title: {title}"));
+                    }
+                }
+                None => output.push_str("\nNext: none"),
+            }
+        }
         if let Some(id) = view.pending.filter(|id| *id > 0) {
             output.push_str(&format!("\nLoading: {id}"));
         }
@@ -357,6 +371,14 @@ pub(crate) fn control_text(path: &Path, command: Command) -> Result<String, Stri
         output.push_str("Playback command completed");
     }
     Ok(output)
+}
+
+fn track_title(path: &Path, id: i64) -> Option<String> {
+    muse_library::Library::open(path)
+        .ok()?
+        .track(id)
+        .ok()
+        .map(|track| track.title)
 }
 
 pub(crate) fn control(path: &Path, command: Command) -> Result<(), String> {

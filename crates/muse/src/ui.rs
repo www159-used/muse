@@ -151,7 +151,7 @@ impl App {
             command: None,
             search_prompt: None,
             search: None,
-            message: "全部本地 is the current playlist. Enter plays inside it; r cycles mode; l opens lyrics. :import adds music.".into(),
+            message: "全部本地 is the current playlist. Enter plays inside it; r cycles mode; l opens lyrics. :import adds music. :next plays the selected track once.".into(),
             details: Vec::new(),
             details_focused: false,
             details_scroll: (0, 0),
@@ -877,6 +877,14 @@ impl App {
                 self.playlist_command(rest);
                 return;
             }
+            Some((BuiltinCommand::NextOnce, rest)) => {
+                if !rest.is_empty() {
+                    self.message = "Usage: :next".into();
+                    return;
+                }
+                self.queue_selected_next();
+                return;
+            }
             None => {
                 self.message = format!("Unknown command: {input}");
                 return;
@@ -1158,16 +1166,46 @@ impl App {
         self.message = format!("Current playlist: {}", playlist.name);
     }
 
+    fn queue_selected_next(&mut self) {
+        let Some(id) = self
+            .selection
+            .selected()
+            .and_then(|index| self.tracks.get(index))
+            .map(|track| track.id)
+        else {
+            self.message = "Select a track to play next once".into();
+            return;
+        };
+        if let Some(playback) = &self.playback {
+            self.message = match playback.play_next_once(id) {
+                Ok(()) => format!("Track {id} will play next once on the current playlist"),
+                Err(error) => error,
+            };
+        } else {
+            self.message = "Playback is not available".into();
+        }
+    }
+
     fn show_report(&mut self, report: ImportReport) {
+        let nothing = report.imported == 0
+            && report.duplicates == 0
+            && report.collisions == 0
+            && report.failed.is_empty()
+            && report.attachment_issues.is_empty()
+            && report.scan_issues.is_empty()
+            && report.stopped.is_none()
+            && !report.cancelled;
+        let outcome = if report.cancelled {
+            "cancelled"
+        } else if report.stopped.is_some() {
+            "stopped"
+        } else if nothing {
+            "nothing was imported"
+        } else {
+            "completed"
+        };
         self.message = format!(
-            "Import {}: added {}, skipped duplicates {}, failed {}, attachment/metadata issues {}, scan issues {}, retained collisions {}",
-            if report.cancelled {
-                "cancelled"
-            } else if report.stopped.is_some() {
-                "stopped"
-            } else {
-                "completed"
-            },
+            "Import {outcome}: added {}, skipped duplicates {}, failed {}, attachment/metadata issues {}, scan issues {}, retained collisions {}",
             report.imported,
             report.duplicates,
             report.failed.len(),
@@ -1175,6 +1213,22 @@ impl App {
             report.scan_issues.len(),
             report.collisions
         );
+        if !report.failed.is_empty() {
+            let failures = report
+                .failed
+                .iter()
+                .map(|issue| {
+                    let name = issue
+                        .path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| issue.path.display().to_string());
+                    format!("{name}: {}", issue.reason)
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            self.message.push_str(&format!(" — {failures}"));
+        }
         self.details = vec![self.message.clone()];
         if let Some(reason) = report.stopped {
             self.details.push(format!("Stopped: {reason}"));
@@ -1560,7 +1614,27 @@ impl App {
             })
             .map(|track| track.title.as_str())
             .unwrap_or("");
-        format!("{state} {title} {position}/{total} | {playlist} | {mode}")
+        format!(
+            "{state} {title} {position}/{total} | {playlist} | {mode} | {}",
+            self.next_hint()
+        )
+    }
+
+    fn next_hint(&self) -> String {
+        match self.playback_view.next_track_id {
+            Some(id) => {
+                let title = self
+                    .groups
+                    .iter()
+                    .flat_map(|group| group.candidates.iter())
+                    .chain(self.tracks.iter())
+                    .find(|track| track.id == id)
+                    .map(|track| track.title.as_str())
+                    .unwrap_or("unknown");
+                format!("next: {title}")
+            }
+            None => "next: none".into(),
+        }
     }
 
     fn draw_lyrics_top(&self, frame: &mut Frame, area: Rect) {

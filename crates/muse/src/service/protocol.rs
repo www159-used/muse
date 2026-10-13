@@ -20,6 +20,7 @@ pub enum Command {
     PlayPlaylist(i64),
     UsePlaylist(i64),
     Next,
+    PlayNextOnce(i64),
     CycleMode,
     SetMode(RepeatMode),
     Play,
@@ -41,6 +42,7 @@ impl Command {
             Self::PlayPlaylist(id) => Action::PlayPlaylist(id),
             Self::UsePlaylist(id) => Action::UsePlaylist(id),
             Self::Next => Action::Next,
+            Self::PlayNextOnce(id) => Action::PlayNextOnce(id),
             Self::CycleMode => Action::CycleMode,
             Self::SetMode(mode) => Action::SetMode(mode),
             Self::Play => Action::Play,
@@ -84,6 +86,10 @@ pub struct Snapshot {
     playlist_index: Option<u32>,
     playlist_len: u32,
     mode: RepeatMode,
+    #[serde(default)]
+    next_index: Option<u32>,
+    #[serde(default)]
+    next_track_id: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -113,6 +119,8 @@ impl From<View> for Snapshot {
             playlist_index: view.playlist_index,
             playlist_len: view.playlist_len,
             mode: view.mode,
+            next_index: view.next_index,
+            next_track_id: view.next_track_id,
             status: view.status.map(|s| Status {
                 position: s.position,
                 duration: s.duration,
@@ -139,6 +147,8 @@ impl From<Snapshot> for View {
             playlist_index: snapshot.playlist_index,
             playlist_len: snapshot.playlist_len,
             mode: snapshot.mode,
+            next_index: snapshot.next_index,
+            next_track_id: snapshot.next_track_id,
             status: snapshot.status.map(|s| PlaybackStatus {
                 position: s.position,
                 duration: s.duration,

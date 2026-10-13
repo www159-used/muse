@@ -4,7 +4,7 @@ use muse_library::{Library, PlaylistKind, SCHEMA_VERSION, SongGroup, Track};
 use serde_json::json;
 use std::{ffi::OsString, path::Path, sync::atomic::AtomicBool};
 
-pub const HELP: &str = "list [--search text] [--candidates] [--json]\nshow <candidate-id|g:anchor> [--json]\nimport <file-or-folder>\nplaylist list | playlist create <name> | playlist add <playlist> <track-id> | playlist play <playlist>\nplay [candidate-id|g:anchor] | next | mode [sequential|list|single] | pause | stop | status | shutdown\nlibrary info | library upgrade\nhelp | quit (q) | detach\nPlayback stays inside the current playlist. The default playlist is 全部本地.\nCandidate IDs are stable; g: tokens identify current browsing groups.\nMultiple candidates require selection. Quit stops playback; detach keeps it.";
+pub const HELP: &str = "list [--search text] [--candidates] [--json]\nshow <candidate-id|g:anchor> [--json]\nimport <file-or-folder>\nplaylist list | playlist create <name> | playlist add <playlist> <track-id> | playlist play <playlist>\nplay [candidate-id|g:anchor] | next | next-once <track-id> | mode [sequential|list|single] | pause | stop | status | shutdown\nlibrary info | library upgrade\nhelp | quit (q) | detach\nPlayback stays inside the current playlist. next-once plays one of its tracks next, then continues that same playlist. The default playlist is 全部本地.\nCandidate IDs are stable; g: tokens identify current browsing groups.\nMultiple candidates require selection. Quit stops playback; detach keeps it.";
 
 #[derive(Default)]
 pub struct CommandOutput {
@@ -326,13 +326,19 @@ fn query(path: &Path, name: &str, args: &[OsString]) -> Result<CommandOutput, St
 }
 
 pub fn report_import(report: muse_library::ImportReport) -> CommandOutput {
-    let mut diagnostics = format!(
-        "Import: added {}, retained collisions {}, exact duplicates {}, failed {}",
-        report.imported,
-        report.collisions,
-        report.duplicates,
-        report.failed.len()
-    );
+    let nothing = import_added_nothing(&report);
+    let mut diagnostics = if nothing {
+        "Import: nothing was imported, added 0, retained collisions 0, exact duplicates 0, failed 0"
+            .to_owned()
+    } else {
+        format!(
+            "Import: added {}, retained collisions {}, exact duplicates {}, failed {}",
+            report.imported,
+            report.collisions,
+            report.duplicates,
+            report.failed.len()
+        )
+    };
     for issue in report
         .failed
         .iter()
@@ -353,6 +359,17 @@ pub fn report_import(report: muse_library::ImportReport) -> CommandOutput {
         diagnostics,
         failure,
     }
+}
+
+fn import_added_nothing(report: &muse_library::ImportReport) -> bool {
+    report.imported == 0
+        && report.duplicates == 0
+        && report.collisions == 0
+        && report.failed.is_empty()
+        && report.attachment_issues.is_empty()
+        && report.scan_issues.is_empty()
+        && report.stopped.is_none()
+        && !report.cancelled
 }
 
 pub fn candidate_labels(library: &Library, group: &SongGroup) -> Result<Vec<String>, String> {

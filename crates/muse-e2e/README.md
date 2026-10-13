@@ -21,6 +21,8 @@ Start with [repeat-import.feature](scenarios/import/repeat-import.feature): impo
 | [All-local playback](scenarios/playlist/all-local-play.feature) | Playing 全部本地 starts sequential playback of the imported tracks. |
 | [Sequential stop](scenarios/playlist/sequential-stop.feature) | Next walks the playlist and a further next fails on the last track. |
 | [Repeat modes](scenarios/playlist/repeat-modes.feature) | Cycling mode walks sequential, list loop, and single loop. |
+| [Next track](scenarios/playlist/next-track.feature) | Status shows the upcoming track, no next track after the last sequential track, and play-next-once stays on 全部本地. |
+| [Import feedback](scenarios/import/import-feedback.feature) | A corrupt file is reported, a fixed file imports on retry, and an empty folder adds nothing. |
 
 Every import checks added/duplicate counts, rejects unexpected failures or issues, verifies library audio against independent fixtures and checks that all prepared source files remain unchanged. Track tables describe the complete library and match each row once without depending on import order.
 
@@ -63,6 +65,13 @@ The feature describes user actions and observable outcomes. [Cucumber's step att
 | `Then the playback mode is "sequential"` | [playback_mode](tests/steps/then.rs) reads the status mode label. |
 | `Then the current track index is 1 of 2` | [track_index](tests/steps/then.rs) reads the 1-based status index. |
 | `Then advancing fails` | [advancing_fails](tests/steps/then.rs) checks that the attempted `next` was rejected. |
+| `Then the next track index is 2 of 2` | [next_track_index](tests/steps/then.rs) reads the 1-based status next index. |
+| `Then there is no next track` | [no_next_track](tests/steps/then.rs) checks that status reports no upcoming track. |
+| `Then the next track title is the title of fixture "tone.flac"` | [next_track_title](tests/steps/then.rs) compares the status title with the imported fixture. |
+| `When I queue the track from fixture "tagged.mp3" to play next once` | [queue_next](tests/steps/when.rs) runs `next-once` for that imported track. |
+| `Given "downloads/bad.mp3" is an unreadable or corrupt audio file` | [corrupt_audio](tests/steps/given.rs) writes bytes that are not audio. |
+| `Then the import reports a failure for "bad.mp3"` | [import_failure](tests/steps/then.rs) checks the filename and a non-empty reason. |
+| `Then the import reports that nothing was imported` | [nothing_imported](tests/steps/then.rs) checks an empty successful import. |
 
 The [World](tests/support/world.rs) holds one real temporary source directory, a separate SQLite library and the latest import report. Cucumber creates a new World for each scenario and registers the step definitions automatically. [The entry point](tests/import.rs) starts the runner and treats skipped/undefined steps as failures. An empty story directory also fails.
 
