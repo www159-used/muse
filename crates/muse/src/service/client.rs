@@ -114,9 +114,6 @@ impl Client {
     pub fn cycle_mode(&self) -> Result<(), String> {
         self.send(Command::CycleMode)
     }
-    pub fn play_next_once(&self, id: i64) -> Result<(), String> {
-        self.send(Command::PlayNextOnce(id))
-    }
     pub fn toggle(&self) -> Result<(), String> {
         self.send(Command::Toggle)
     }

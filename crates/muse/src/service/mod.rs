@@ -423,10 +423,10 @@ fn track_title(path: &Path, id: i64) -> Option<String> {
         .map(|track| track.title)
 }
 
-/// Colon `:pause`, `:play`, `:play <id>`, and `:prev`.
+/// Colon `:pause`, `:play`, `:play <id>`, `:next`, and `:prev`.
 ///
-/// Unlike CLI `play <id>`, this does not start a daemon. A missing service is
-/// the same error as `pause` / `prev`.
+/// Unlike CLI `play <id>` and CLI `next`, this does not start a daemon. A
+/// missing service is the same error as `pause` / `prev`.
 pub(crate) fn transport(path: &Path, command: Command) -> Result<View, String> {
     let remote = Remote::find(path)?.ok_or_else(|| TRANSPORT_NEEDS_SERVICE.to_string())?;
     remote.call(command, None)

@@ -151,7 +151,7 @@ impl App {
             command: None,
             search_prompt: None,
             search: None,
-            message: "全部本地 is the current playlist. Enter plays inside it; r cycles mode; l opens lyrics. :import adds music. :next plays the selected track once. :pause, :play, and :prev control playback.".into(),
+            message: "全部本地 is the current playlist. Enter plays inside it; r cycles mode; l opens lyrics. :import adds music. :next and :prev move through the current playlist. :pause and :play control playback.".into(),
             details: Vec::new(),
             details_focused: false,
             details_scroll: (0, 0),
@@ -877,12 +877,8 @@ impl App {
                 self.playlist_command(rest);
                 return;
             }
-            Some((BuiltinCommand::NextOnce, rest)) => {
-                if !rest.is_empty() {
-                    self.message = "Usage: :next".into();
-                    return;
-                }
-                self.queue_selected_next();
+            Some((BuiltinCommand::Next, _)) => {
+                self.colon_transport(crate::service::Command::Next);
                 return;
             }
             Some((BuiltinCommand::Volume, rest)) => {
@@ -1213,26 +1209,6 @@ impl App {
             return;
         }
         self.message = format!("Current playlist: {}", playlist.name);
-    }
-
-    fn queue_selected_next(&mut self) {
-        let Some(id) = self
-            .selection
-            .selected()
-            .and_then(|index| self.tracks.get(index))
-            .map(|track| track.id)
-        else {
-            self.message = "Select a track to play next once".into();
-            return;
-        };
-        if let Some(playback) = &self.playback {
-            self.message = match playback.play_next_once(id) {
-                Ok(()) => format!("Track {id} will play next once on the current playlist"),
-                Err(error) => error,
-            };
-        } else {
-            self.message = "Playback is not available".into();
-        }
     }
 
     fn show_report(&mut self, report: ImportReport) {
@@ -1946,6 +1922,7 @@ fn colon_transport_message(command: crate::service::Command, view: &PlaybackView
             }
         }
         crate::service::Command::Play | crate::service::Command::Load(_) => "playing".into(),
+        crate::service::Command::Next => "next".into(),
         crate::service::Command::Prev => "prev".into(),
         _ => "ok".into(),
     }
@@ -3514,12 +3491,17 @@ mod tests {
         let resumed_flash = colon_transport_message(crate::service::Command::Pause, &playing);
         assert_eq!(paused_flash, "paused");
         assert_eq!(resumed_flash, "resumed");
+        assert_eq!(
+            colon_transport_message(crate::service::Command::Next, &playing),
+            "next"
+        );
         assert_ne!(paused_flash, resumed_flash);
         for message in [
             paused_flash,
             resumed_flash,
             colon_transport_message(crate::service::Command::Play, &playing),
             colon_transport_message(crate::service::Command::Load(4), &playing),
+            colon_transport_message(crate::service::Command::Next, &playing),
             colon_transport_message(crate::service::Command::Prev, &playing),
         ] {
             assert_transport_flash(&message);
@@ -3550,7 +3532,7 @@ mod tests {
     fn colon_transport_without_a_service_fails_like_volume() {
         let temporary = TempDir::new().unwrap();
         let mut app = App::new(temporary.path().join("library.muse")).unwrap();
-        for command in ["pause", "play", "play 1", "prev"] {
+        for command in ["pause", "play", "play 1", "prev", "next"] {
             app.execute_command(command);
             assert!(
                 app.message.contains("no playback service running"),
@@ -3731,6 +3713,8 @@ mod tests {
         assert_eq!(app.message, "nothing to control");
         app.execute_command("prev");
         assert_eq!(app.message, "nothing to control");
+        app.execute_command("next");
+        assert_eq!(app.message, "end of playlist");
         app.execute_command("play abc");
         assert!(
             app.message.contains("positive candidate ID"),
@@ -3783,6 +3767,54 @@ mod tests {
         assert_eq!(stayed.current.unwrap().id, ids[0]);
         assert_eq!(stayed.playlist_index, Some(0));
         assert_eq!(stayed.next_index, Some(1));
+        let stayed_text = crate::service::format_status(&path, &stayed).unwrap();
+        assert!(stayed_text.contains(&format!("Track: {}", ids[0])));
+        assert!(stayed_text.contains("Index: 1/2"));
+        assert!(stayed_text.contains("Next: 2/2"));
+        app.execute_command("next");
+        assert_eq!(app.message, "next");
+        assert_transport_flash(&app.message);
+        let advanced = remote.call(crate::service::Command::Status, None).unwrap();
+        let advanced_text = crate::service::format_status(&path, &advanced).unwrap();
+        assert!(advanced_text.contains(&format!("Track: {}", ids[1])));
+        assert!(advanced_text.contains("Index: 2/2"));
+        assert!(advanced_text.contains("Next: none"));
+        assert!(advanced_text.lines().all(|line| !line.starts_with("Prev:")));
+        assert_eq!(app.playback_view.current.unwrap().id, ids[1]);
+        assert_eq!(app.playback_view.playlist_index, Some(1));
+        assert_eq!(app.playback_view.next_index, None);
+        app.execute_command("next");
+        assert_eq!(app.message, "end of playlist");
+        let blocked = remote.call(crate::service::Command::Status, None).unwrap();
+        let blocked_text = crate::service::format_status(&path, &blocked).unwrap();
+        assert!(blocked_text.contains(&format!("Track: {}", ids[1])));
+        assert!(blocked_text.contains("Index: 2/2"));
+        assert!(blocked_text.contains("Next: none"));
+        remote
+            .call(
+                crate::service::Command::SetMode(crate::playback::RepeatMode::Track),
+                None,
+            )
+            .unwrap();
+        app.execute_command("next");
+        assert_eq!(app.message, "end of playlist");
+        let single = remote.call(crate::service::Command::Status, None).unwrap();
+        assert_eq!(single.current.unwrap().id, ids[1]);
+        assert_eq!(single.playlist_index, Some(1));
+        remote
+            .call(
+                crate::service::Command::SetMode(crate::playback::RepeatMode::List),
+                None,
+            )
+            .unwrap();
+        app.execute_command("next");
+        assert_eq!(app.message, "next");
+        let wrapped = remote.call(crate::service::Command::Status, None).unwrap();
+        let wrapped_text = crate::service::format_status(&path, &wrapped).unwrap();
+        assert!(wrapped_text.contains(&format!("Track: {}", ids[0])));
+        assert!(wrapped_text.contains("Index: 1/2"));
+        assert!(wrapped_text.contains("Next: 2/2"));
+        assert!(wrapped_text.contains("Mode: list loop"));
         remote
             .call(crate::service::Command::PlayPlaylist(night.id), None)
             .unwrap();
