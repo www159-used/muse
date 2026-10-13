@@ -100,6 +100,19 @@ impl Session {
         }
     }
 
+    pub fn expect_failure_containing(&self, needle: &str) -> Result<()> {
+        match &self.advance_attempt {
+            Some(Err(error)) if error.contains(needle) => Ok(()),
+            Some(Err(error)) => Err(format!("failure did not contain {needle}: {error}").into()),
+            Some(Ok(())) => Err("command succeeded".into()),
+            None => Err("command was not attempted".into()),
+        }
+    }
+
+    pub fn status(&self) -> Result<String> {
+        self.status_text()
+    }
+
     pub fn status_line(&self, label: &str) -> Result<String> {
         let text = self.status_text()?;
         text.lines()

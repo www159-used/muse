@@ -4,7 +4,7 @@ use muse_library::{Library, PlaylistKind, SCHEMA_VERSION, SongGroup, Track};
 use serde_json::json;
 use std::{ffi::OsString, path::Path, sync::atomic::AtomicBool};
 
-pub const HELP: &str = "list [--search text] [--candidates] [--json]\nshow <candidate-id|g:anchor> [--json]\nimport <file-or-folder>\nplaylist list | playlist create <name> | playlist add <playlist> <track-id> | playlist play <playlist>\nplay [candidate-id|g:anchor] | next | next-once <track-id> | mode [sequential|list|single] | pause | stop | status | shutdown\nvolume | volume set <0-100> | volume inc <steps> | volume dec <steps>\nlibrary info | library upgrade\nhelp | quit (q) | detach\nPlayback stays inside the current playlist. next-once plays one of its tracks next, then continues that same playlist. The default playlist is 全部本地.\nVolume is application gain from 0 to 100 and does not change the system mixer. inc and dec clamp to that range.\nCandidate IDs are stable; g: tokens identify current browsing groups.\nMultiple candidates require selection. Quit stops playback; detach keeps it.";
+pub const HELP: &str = "list [--search text] [--candidates] [--json]\nshow <candidate-id|g:anchor> [--json]\nimport <file-or-folder>\nplaylist list | playlist create <name> | playlist add <playlist> <track-id> | playlist play <playlist>\nplay [candidate-id|g:anchor] | next | prev | next-once <track-id> | mode [sequential|list|single] | pause | stop | status | shutdown\nvolume | volume set <0-100> | volume inc <steps> | volume dec <steps>\nlibrary info | library upgrade\nhelp | quit (q) | detach\nPlayback stays inside the current playlist. next-once plays one of its tracks next, then continues that same playlist. The default playlist is 全部本地.\nprev moves to the previous track in that playlist. Sequential and single-loop playback fail at the first track instead of wrapping; list loop wraps to the last track.\nVolume is application gain from 0 to 100 and does not change the system mixer. inc and dec clamp to that range.\nCandidate IDs are stable; g: tokens identify current browsing groups.\nMultiple candidates require selection. Quit stops playback; detach keeps it.";
 
 #[derive(Default)]
 pub struct CommandOutput {
@@ -112,16 +112,19 @@ pub fn execute(path: &Path, args: &[OsString]) -> Result<CommandOutput, String> 
             };
             service::control_text(path, command).map(Into::into)
         }
-        "pause" | "stop" | "status" | "shutdown" if rest.is_empty() => service::control_text(
-            path,
-            match name {
-                "pause" => service::Command::Pause,
-                "stop" => service::Command::Stop,
-                "shutdown" => service::Command::Shutdown,
-                _ => service::Command::Status,
-            },
-        )
-        .map(Into::into),
+        "pause" | "prev" | "stop" | "status" | "shutdown" if rest.is_empty() => {
+            service::control_text(
+                path,
+                match name {
+                    "pause" => service::Command::Pause,
+                    "prev" => service::Command::Prev,
+                    "stop" => service::Command::Stop,
+                    "shutdown" => service::Command::Shutdown,
+                    _ => service::Command::Status,
+                },
+            )
+            .map(Into::into)
+        }
         "library" if rest == [OsString::from("upgrade")] => {
             if service::Remote::find(path)?.is_some() {
                 return Err("stop the playback service with shutdown and close clients before library upgrade".into());

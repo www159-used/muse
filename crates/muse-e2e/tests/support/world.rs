@@ -245,6 +245,22 @@ impl ImportWorld {
         self.session()?.run(&["next"])
     }
 
+    pub fn previous(&mut self) -> Result<()> {
+        self.session()?.run(&["prev"])
+    }
+
+    pub fn attempt_previous(&mut self) -> Result<()> {
+        self.session()?.attempt(&["prev"])
+    }
+
+    pub fn pause(&mut self) -> Result<()> {
+        self.session()?.run(&["pause"])
+    }
+
+    pub fn resume(&mut self) -> Result<()> {
+        self.session()?.run(&["play"])
+    }
+
     pub fn attempt_advance(&mut self) -> Result<()> {
         self.session()?.attempt(&["next"])
     }
@@ -274,6 +290,24 @@ impl ImportWorld {
             .as_ref()
             .ok_or("playback has not started")?
             .expect_advance_failed()
+    }
+
+    pub fn expect_failure_containing(&self, needle: &str) -> Result<()> {
+        self.playback
+            .as_ref()
+            .ok_or("playback has not started")?
+            .expect_failure_containing(needle)
+    }
+
+    pub fn status(&self) -> Result<String> {
+        self.playback
+            .as_ref()
+            .ok_or("playback has not started")?
+            .status()
+    }
+
+    pub fn command_output(&mut self, args: &[&str]) -> Result<std::process::Output> {
+        self.session()?.output(args)
     }
 
     pub fn status_line(&self, label: &str) -> Result<String> {

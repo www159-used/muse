@@ -53,6 +53,13 @@ impl RepeatMode {
     }
 }
 
+/// `prev` on the first track of sequential or single-loop playback.
+/// List loop wraps instead. This is the counterpart of `end of playlist`.
+pub(crate) const START_OF_PLAYLIST: &str = "start of playlist";
+
+/// `pause` or `prev` when no track is loaded, including an empty playlist.
+pub(crate) const NOTHING_TO_CONTROL: &str = "nothing to control";
+
 #[derive(Clone, Debug)]
 pub(crate) struct View {
     pub current: Option<Current>,
@@ -96,6 +103,7 @@ pub(crate) enum Action {
     PlayPlaylist(i64),
     UsePlaylist(i64),
     Next,
+    Prev,
     /// Play one playlist track next, then continue the same playlist.
     PlayNextOnce(i64),
     CycleMode,
@@ -306,6 +314,19 @@ impl Worker {
                                 Ok(false) => Err("end of playlist".into()),
                                 Err(error) => Err(error),
                             },
+                            Action::Prev => retreat(&mut task!()),
+                            Action::Pause => {
+                                if current.is_none() {
+                                    Err(NOTHING_TO_CONTROL.into())
+                                } else {
+                                    match player.as_mut() {
+                                        Some(player) => {
+                                            player.pause().map_err(|error| error.to_string())
+                                        }
+                                        None => Err(NOTHING_TO_CONTROL.into()),
+                                    }
+                                }
+                            }
                             Action::PlayNextOnce(id) => match refresh_order(&path, &mut session) {
                                 Ok(()) => {
                                     place_index(&mut session, current);
@@ -346,15 +367,12 @@ impl Worker {
                                 commit_volume(&path, &mut volume, player.as_mut(), next)
                             }
                             action
-                                if matches!(
-                                    action,
-                                    Action::Stop | Action::Play | Action::Pause
-                                ) || accepts(request.expected, current) =>
+                                if matches!(action, Action::Stop | Action::Play)
+                                    || accepts(request.expected, current) =>
                             {
                                 match player.as_mut() {
                                     Some(player) => match action {
                                         Action::Play => player.play(),
-                                        Action::Pause => player.pause(),
                                         Action::Toggle => player.status().and_then(|status| {
                                             if status.state == PlaybackState::Playing {
                                                 player.pause()
@@ -367,9 +385,7 @@ impl Worker {
                                         _ => unreachable!(),
                                     }
                                     .map_err(|error| error.to_string()),
-                                    None if matches!(action, Action::Stop | Action::Pause) => {
-                                        Ok(())
-                                    }
+                                    None if matches!(action, Action::Stop) => Ok(()),
                                     None => Err(
                                         "no track loaded; press Enter to play the selected track"
                                             .into(),
@@ -382,7 +398,7 @@ impl Worker {
                         view.current = current;
                         if matches!(
                             request.action,
-                            Action::Load(_) | Action::PlayPlaylist(_) | Action::Next
+                            Action::Load(_) | Action::PlayPlaylist(_) | Action::Next | Action::Prev
                         ) {
                             view.pending = None;
                         }
@@ -469,7 +485,9 @@ impl Worker {
             let mut view = lock(&self.view);
             let loading = match action {
                 Action::Load(id) | Action::PlayPlaylist(id) => Some(id),
-                Action::Next => Some(view.current.map(|current| current.id).unwrap_or(0)),
+                Action::Next | Action::Prev => {
+                    Some(view.current.map(|current| current.id).unwrap_or(0))
+                }
                 _ => None,
             };
             if loading.is_some() {
@@ -612,12 +630,18 @@ fn load_track<P: Playback, F: Fn() -> Result<P, String>>(
     id: i64,
 ) -> Result<(), String> {
     refresh_order(task.path, task.session)?;
+    let library = Library::open(task.path).map_err(|error| error.to_string())?;
+    match library.track(id) {
+        Ok(_) => {}
+        Err(muse_library::LibraryError::TrackNotFound(_)) => {
+            return Err(format!("track {id} does not exist"));
+        }
+        Err(error) => return Err(error.to_string()),
+    }
     if !task.session.order.contains(&id) {
         return Err(format!("track {id} is not in the current playlist"));
     }
-    let source = Library::open(task.path)
-        .and_then(|library| library.open_audio(id))
-        .map_err(|error| error.to_string())?;
+    let source = library.open_audio(id).map_err(|error| error.to_string())?;
     if task.player.is_none() {
         *task.player = Some((task.open)()?);
         task.player
@@ -709,6 +733,55 @@ fn advance<P: Playback, F: Fn() -> Result<P, String>>(
     };
     load_track(task, target)?;
     Ok(true)
+}
+
+/// Step to the previous track in the current playlist.
+///
+/// Sequential and single-loop playback fail at the first track. List loop wraps
+/// to the last track, matching manual `next` at the end of a looping list.
+fn retreat<P: Playback, F: Fn() -> Result<P, String>>(
+    task: &mut PlaybackTask<'_, P, F>,
+) -> Result<(), String> {
+    refresh_order(task.path, task.session)?;
+    let saved_index = task.session.index;
+    let saved_once = task.session.playing_once;
+    let saved_anchor = task.session.resume_anchor;
+    place_index(task.session, *task.current);
+    let restore = |session: &mut PlaylistSession| {
+        session.index = saved_index;
+        session.playing_once = saved_once;
+        session.resume_anchor = saved_anchor;
+    };
+    let target = match task.session.index {
+        None => {
+            restore(task.session);
+            return Err(NOTHING_TO_CONTROL.into());
+        }
+        Some(index) if index > 0 => task.session.order.get(index - 1).copied(),
+        Some(_) if task.session.mode == RepeatMode::List => task.session.order.last().copied(),
+        Some(_) => None,
+    };
+    let Some(target) = target else {
+        restore(task.session);
+        return Err(if task.session.order.is_empty() {
+            NOTHING_TO_CONTROL.into()
+        } else {
+            START_OF_PLAYLIST.into()
+        });
+    };
+    let before = task.current.map(|current| current.id);
+    if let Err(error) = load_track(task, target) {
+        if task.current.map(|current| current.id) == before {
+            restore(task.session);
+        } else {
+            task.session.playing_once = false;
+            task.session.resume_anchor = None;
+        }
+        return Err(error);
+    }
+    task.session.playing_once = false;
+    task.session.resume_anchor = None;
+    Ok(())
 }
 
 impl Drop for Worker {
@@ -1206,5 +1279,111 @@ mod tests {
         assert_eq!(view.next_index, Some(2));
         assert_eq!(view.next_track_id, Some(tracks[2].id));
         assert_ne!(view.next_track_id, Some(removed));
+    }
+
+    fn scripted(path: PathBuf) -> Worker {
+        Worker::start_with(path, || {
+            Ok(Scripted {
+                status: Mutex::new(PlaybackStatus {
+                    state: PlaybackState::Empty,
+                    position: Duration::ZERO,
+                    duration: None,
+                }),
+                finish: Arc::new(AtomicBool::new(false)),
+                loads: Arc::new(Mutex::new(Vec::new())),
+                plays: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                volume: Arc::new(std::sync::atomic::AtomicU8::new(100)),
+            })
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn prev_steps_backward_and_does_not_wrap_the_first_sequential_track() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let path = temporary.path().join("library.muse");
+        let mut library = Library::open(&path).unwrap();
+        for (name, bytes) in [
+            (
+                "a.mp3",
+                &include_bytes!("../../muse-library/tests/fixtures/silence.mp3")[..],
+            ),
+            (
+                "b.flac",
+                &include_bytes!("../../muse-library/tests/fixtures/tone.flac")[..],
+            ),
+        ] {
+            let file = temporary.path().join(name);
+            std::fs::write(&file, bytes).unwrap();
+            assert_eq!(library.import(&file).imported, 1);
+        }
+        let ids: Vec<_> = library
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|track| track.id)
+            .collect();
+        let playlist = library.all_local().unwrap().id;
+        let night = library.create_playlist("Night").unwrap();
+        assert!(library.add_to_playlist(night.id, ids[0]).unwrap());
+        drop(library);
+        let worker = scripted(path);
+        let paused = worker.execute(Action::Pause, None).unwrap_err();
+        assert_eq!(paused, NOTHING_TO_CONTROL);
+        let backed = worker.execute(Action::Prev, None).unwrap_err();
+        assert_eq!(backed, NOTHING_TO_CONTROL);
+        assert!(worker.view().current.is_none());
+        let missing = worker.execute(Action::Load(999_999), None).unwrap_err();
+        assert!(missing.contains("does not exist"), "{missing}");
+        assert!(
+            !missing.contains("not in the current playlist"),
+            "{missing}"
+        );
+        let started = worker
+            .execute(Action::PlayPlaylist(playlist), None)
+            .unwrap();
+        assert_eq!(started.playlist_index, Some(0));
+        assert_eq!(started.current.unwrap().id, ids[0]);
+        assert_eq!(started.next_index, Some(1));
+        let blocked = worker.execute(Action::Prev, None).unwrap_err();
+        assert_eq!(blocked, START_OF_PLAYLIST);
+        let stayed = worker.view();
+        assert_eq!(stayed.current.unwrap().id, ids[0]);
+        assert_eq!(stayed.playlist_index, Some(0));
+        assert_eq!(stayed.next_index, Some(1));
+        assert_eq!(stayed.next_track_id, Some(ids[1]));
+        worker
+            .execute(Action::SetMode(RepeatMode::Track), None)
+            .unwrap();
+        assert_eq!(
+            worker.execute(Action::Prev, None).unwrap_err(),
+            START_OF_PLAYLIST
+        );
+        assert_eq!(worker.view().current.unwrap().id, ids[0]);
+        worker
+            .execute(Action::SetMode(RepeatMode::List), None)
+            .unwrap();
+        let wrapped = worker.execute(Action::Prev, None).unwrap();
+        assert_eq!(wrapped.current.unwrap().id, ids[1]);
+        assert_eq!(wrapped.playlist_index, Some(1));
+        assert_eq!(wrapped.mode, RepeatMode::List);
+        assert_eq!(wrapped.next_index, Some(0));
+        worker
+            .execute(Action::SetMode(RepeatMode::Sequential), None)
+            .unwrap();
+        let back = worker.execute(Action::Prev, None).unwrap();
+        assert_eq!(back.current.unwrap().id, ids[0]);
+        assert_eq!(back.playlist_index, Some(0));
+        assert_eq!(back.next_index, Some(1));
+        assert_eq!(back.next_track_id, Some(ids[1]));
+        let switched = worker
+            .execute(Action::PlayPlaylist(night.id), None)
+            .unwrap();
+        assert_eq!(switched.current.unwrap().id, ids[0]);
+        let foreign = worker.execute(Action::Load(ids[1]), None).unwrap_err();
+        assert!(foreign.contains("not in the current playlist"), "{foreign}");
+        assert!(!foreign.contains("does not exist"), "{foreign}");
+        assert_eq!(worker.view().current.unwrap().id, ids[0]);
+        assert_eq!(worker.view().playlist_index, Some(0));
     }
 }

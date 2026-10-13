@@ -209,6 +209,46 @@ fn advancing_fails(world: &mut ImportWorld) -> Result<()> {
     world.expect_advance_failed()
 }
 
+#[then("going back fails")]
+fn going_back_fails(world: &mut ImportWorld) -> Result<()> {
+    world.expect_failure_containing("start of playlist")
+}
+
+#[then(expr = "the playback state is {string}")]
+fn playback_state(world: &mut ImportWorld, state: String) -> Result<()> {
+    assert_eq!(world.status_line("State")?, state, "playback state");
+    Ok(())
+}
+
+#[then("the status has no previous-track field")]
+fn no_previous_field(world: &mut ImportWorld) -> Result<()> {
+    let text = world.status()?;
+    assert!(
+        text.lines().all(|line| !line.starts_with("Prev:")),
+        "status invented a previous-track field:\n{text}"
+    );
+    Ok(())
+}
+
+#[then("transport commands fail because playback is not running")]
+fn transport_requires_service(world: &mut ImportWorld) -> Result<()> {
+    for args in [vec!["pause"], vec!["play"], vec!["prev"]] {
+        let output = world.command_output(&args)?;
+        assert!(!output.status.success(), "{args:?} was accepted");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("no playback service running"),
+            "{args:?}: {error}"
+        );
+        assert!(
+            error.contains("transport commands need a live playback service"),
+            "{args:?}: {error}"
+        );
+        assert!(!error.contains("State:"), "{args:?}: {error}");
+    }
+    Ok(())
+}
+
 #[then(expr = "the next track index is {int} of {int}")]
 fn next_track_index(world: &mut ImportWorld, index: usize, len: usize) -> Result<()> {
     assert_eq!(

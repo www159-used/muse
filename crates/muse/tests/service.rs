@@ -128,6 +128,7 @@ fn empty_observation_and_invalid_commands_have_no_side_effects() {
     for args in [
         vec!["play"],
         vec!["pause"],
+        vec!["prev"],
         vec!["play", "12"],
         vec!["play", "0"],
         vec!["stop", "extra"],
@@ -432,4 +433,117 @@ fn playlist_commands_play_next_and_cycle_mode() {
     success(cli(&directory, &["mode", "sequential"]));
     assert!(success(cli(&directory, &["status"])).contains("Mode: sequential"));
     success(cli(&directory, &["shutdown"]));
+}
+
+#[test]
+fn prev_pause_and_play_follow_status_and_fail_closed() {
+    let mut session = Session::new();
+    for args in [["pause"], ["prev"]] {
+        let output = cli(&session.directory, &args);
+        assert!(!output.status.success(), "{args:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("nothing to control"), "{args:?}: {error}");
+        assert!(!error.contains("State:"), "{error}");
+    }
+    let bare = cli(&session.directory, &["play"]);
+    assert!(!bare.status.success());
+    assert!(
+        String::from_utf8_lossy(&bare.stderr).contains("no track loaded"),
+        "{}",
+        String::from_utf8_lossy(&bare.stderr)
+    );
+    let missing = cli(&session.directory, &["play", "999999"]);
+    assert!(!missing.status.success());
+    let missing_error = String::from_utf8_lossy(&missing.stderr);
+    assert!(missing_error.contains("does not exist"), "{missing_error}");
+    assert!(
+        !missing_error.contains("not in the current playlist"),
+        "{missing_error}"
+    );
+    let tone = session.directory.path().join("tone.flac");
+    fs::write(
+        &tone,
+        include_bytes!("../../muse-library/tests/fixtures/tone.flac"),
+    )
+    .unwrap();
+    success(cli(&session.directory, &["import", tone.to_str().unwrap()]));
+    let mut library =
+        muse_library::Library::open(session.directory.path().join("library.muse")).unwrap();
+    let ids: Vec<_> = library
+        .list()
+        .unwrap()
+        .into_iter()
+        .map(|track| track.id)
+        .collect();
+    let night = library.create_playlist("Night").unwrap();
+    assert!(library.add_to_playlist(night.id, ids[0]).unwrap());
+    drop(library);
+    success(cli(&session.directory, &["playlist", "play", "Night"]));
+    let foreign = cli(&session.directory, &["play", &ids[1].to_string()]);
+    assert!(!foreign.status.success());
+    let foreign_error = String::from_utf8_lossy(&foreign.stderr);
+    assert!(
+        foreign_error.contains("not in the current playlist"),
+        "{foreign_error}"
+    );
+    assert!(!foreign_error.contains("does not exist"), "{foreign_error}");
+    let held = session.status();
+    assert!(held.contains(&format!("Track: {}", ids[0])));
+    assert!(held.contains("Index: 1/1"));
+    success(cli(&session.directory, &["playlist", "play", "全部本地"]));
+    let started = session.status();
+    assert!(started.contains("State: Playing"));
+    assert!(started.contains("Index: 1/2"));
+    assert!(started.contains("Next: 2/2"));
+    assert!(started.lines().all(|line| !line.starts_with("Prev:")));
+    let blocked = cli(&session.directory, &["prev"]);
+    assert!(!blocked.status.success());
+    assert!(
+        String::from_utf8_lossy(&blocked.stderr).contains("start of playlist"),
+        "{}",
+        String::from_utf8_lossy(&blocked.stderr)
+    );
+    let stayed = session.status();
+    assert!(stayed.contains(&format!("Track: {}", ids[0])));
+    assert!(stayed.contains("Index: 1/2"));
+    assert!(stayed.contains("Next: 2/2"));
+    success(cli(&session.directory, &["next"]));
+    assert!(session.status().contains("Index: 2/2"));
+    let back = success(cli(&session.directory, &["prev"]));
+    assert!(back.contains("Playback command completed"));
+    assert!(!back.contains("State:"));
+    assert!(!back.contains("Prev:"));
+    let returned = session.status();
+    assert!(returned.contains(&format!("Track: {}", ids[0])));
+    assert!(returned.contains("Index: 1/2"));
+    assert!(returned.contains("Next: 2/2"));
+    assert!(returned.lines().all(|line| !line.starts_with("Prev:")));
+    success(cli(&session.directory, &["pause"]));
+    assert!(session.status().contains("State: Paused"));
+    success(cli(&session.directory, &["pause"]));
+    assert!(session.status().contains("State: Paused"));
+    success(cli(&session.directory, &["play"]));
+    assert!(session.status().contains("State: Playing"));
+    success(cli(&session.directory, &["mode", "list"]));
+    success(cli(&session.directory, &["prev"]));
+    let wrapped = session.status();
+    assert!(wrapped.contains("Mode: list loop"));
+    assert!(wrapped.contains("Index: 2/2"));
+    assert!(wrapped.contains("Next: 1/2"));
+    success(cli(&session.directory, &["shutdown"]));
+    assert!(session.child.wait().unwrap().success());
+    for args in [["pause"], ["play"], ["prev"]] {
+        let down = cli(&session.directory, &args);
+        assert!(!down.status.success(), "{args:?}");
+        let error = String::from_utf8_lossy(&down.stderr);
+        assert!(
+            error.contains("no playback service running"),
+            "{args:?}: {error}"
+        );
+        assert!(
+            error.contains("transport commands need a live playback service"),
+            "{args:?}: {error}"
+        );
+        assert!(!error.contains("State:"), "{error}");
+    }
 }

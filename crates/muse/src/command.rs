@@ -20,6 +20,9 @@ pub enum BuiltinCommand {
     Stop,
     Playlist,
     NextOnce,
+    Pause,
+    Play,
+    Prev,
     Volume,
 }
 
@@ -30,6 +33,9 @@ const COMMANDS: &[(&str, BuiltinCommand)] = &[
     ("stop", BuiltinCommand::Stop),
     ("detach", BuiltinCommand::Detach),
     ("next", BuiltinCommand::NextOnce),
+    ("pause", BuiltinCommand::Pause),
+    ("play", BuiltinCommand::Play),
+    ("prev", BuiltinCommand::Prev),
     ("playlist", BuiltinCommand::Playlist),
     ("volume", BuiltinCommand::Volume),
 ];
@@ -44,8 +50,11 @@ impl BuiltinCommand {
             .iter()
             .find(|(registered, _)| *registered == name)?
             .1;
-        (matches!(command, Self::Import | Self::Playlist | Self::Volume) || rest.is_empty())
-            .then_some((command, rest))
+        (matches!(
+            command,
+            Self::Import | Self::Playlist | Self::Volume | Self::Play
+        ) || rest.is_empty())
+        .then_some((command, rest))
     }
 }
 
@@ -202,7 +211,7 @@ impl CommandLine {
             let prefix = self.text[..self.text.len() - name.len()].to_owned();
             let commands: Vec<&str> = if self.repl {
                 vec![
-                    "import", "list", "show", "play", "next", "pause", "stop", "status",
+                    "import", "list", "show", "play", "next", "pause", "prev", "stop", "status",
                     "shutdown", "mode", "playlist", "library", "help", "q", "quit", "detach",
                     "volume",
                 ]
@@ -472,7 +481,8 @@ mod tests {
                 .map(|candidate| candidate.label.as_str())
                 .collect::<Vec<_>>(),
             [
-                "import", "q", "quit", "stop", "detach", "next", "playlist", "volume",
+                "import", "q", "quit", "stop", "detach", "next", "pause", "play", "prev",
+                "playlist", "volume",
             ]
         );
         assert_eq!(input.selected(), None);
@@ -544,6 +554,24 @@ mod tests {
             BuiltinCommand::parse("import \"音 乐/file.ncm\""),
             Some((BuiltinCommand::Import, "\"音 乐/file.ncm\""))
         );
+        assert_eq!(
+            BuiltinCommand::parse("pause"),
+            Some((BuiltinCommand::Pause, ""))
+        );
+        assert_eq!(
+            BuiltinCommand::parse(" play 12 "),
+            Some((BuiltinCommand::Play, "12"))
+        );
+        assert_eq!(
+            BuiltinCommand::parse("play"),
+            Some((BuiltinCommand::Play, ""))
+        );
+        assert_eq!(
+            BuiltinCommand::parse("prev"),
+            Some((BuiltinCommand::Prev, ""))
+        );
+        assert_eq!(BuiltinCommand::parse("pause now"), None);
+        assert_eq!(BuiltinCommand::parse("prev 1"), None);
     }
 
     #[test]

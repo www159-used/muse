@@ -151,7 +151,7 @@ impl App {
             command: None,
             search_prompt: None,
             search: None,
-            message: "全部本地 is the current playlist. Enter plays inside it; r cycles mode; l opens lyrics. :import adds music. :next plays the selected track once.".into(),
+            message: "全部本地 is the current playlist. Enter plays inside it; r cycles mode; l opens lyrics. :import adds music. :next plays the selected track once. :pause, :play, and :prev control playback.".into(),
             details: Vec::new(),
             details_focused: false,
             details_scroll: (0, 0),
@@ -889,6 +889,21 @@ impl App {
                 self.volume_command(rest);
                 return;
             }
+            Some((BuiltinCommand::Pause, _)) => {
+                self.colon_transport(crate::service::Command::Pause);
+                return;
+            }
+            Some((BuiltinCommand::Prev, _)) => {
+                self.colon_transport(crate::service::Command::Prev);
+                return;
+            }
+            Some((BuiltinCommand::Play, rest)) => {
+                match play_target(rest) {
+                    Ok(command) => self.colon_transport(command),
+                    Err(error) => self.message = error,
+                }
+                return;
+            }
             None => {
                 self.message = format!("Unknown command: {input}");
                 return;
@@ -1014,6 +1029,16 @@ impl App {
         } else {
             self.playback_view.mode = self.playback_view.mode.cycle();
             self.message = format!("Playback mode: {}", self.playback_view.mode.label());
+        }
+    }
+
+    fn colon_transport(&mut self, command: crate::service::Command) {
+        match crate::service::transport(&self.library_path, command) {
+            Ok(view) => {
+                self.message = colon_transport_message(command, &view);
+                self.playback_view = view;
+            }
+            Err(error) => self.message = error,
         }
     }
 
@@ -1906,6 +1931,42 @@ impl App {
             .map(|(index, _)| index)
             .next_back()
     }
+}
+
+fn colon_transport_message(command: crate::service::Command, view: &PlaybackView) -> String {
+    match command {
+        crate::service::Command::Pause => {
+            if view
+                .status
+                .is_some_and(|status| status.state == PlaybackState::Playing)
+            {
+                "resumed".into()
+            } else {
+                "paused".into()
+            }
+        }
+        crate::service::Command::Play | crate::service::Command::Load(_) => "playing".into(),
+        crate::service::Command::Prev => "prev".into(),
+        _ => "ok".into(),
+    }
+}
+
+fn play_target(rest: &str) -> Result<crate::service::Command, String> {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Ok(crate::service::Command::Play);
+    }
+    let mut parts = rest.split_whitespace();
+    let token = parts.next().unwrap_or("");
+    if parts.next().is_some() {
+        return Err("Usage: :play [candidate-id]".into());
+    }
+    let id = token
+        .parse::<i64>()
+        .ok()
+        .filter(|id| *id > 0)
+        .ok_or_else(|| "play requires a positive candidate ID".to_string())?;
+    Ok(crate::service::Command::Load(id))
 }
 
 /// TUI success flash. The status bar already shows `vol: N%`, so the message
@@ -3420,6 +3481,328 @@ mod tests {
         app.execute_command("volume inc abc");
         assert!(app.message.contains("abc"), "{}", app.message);
         assert_eq!(app.playback_view.volume, 37);
+    }
+
+    fn assert_transport_flash(message: &str) {
+        assert!(!message.contains('\n'), "{message}");
+        for field in [
+            "State:", "Track:", "Index:", "Next:", "Prev:", "Volume:", "Gain:",
+        ] {
+            assert!(!message.contains(field), "{message}");
+        }
+    }
+
+    #[test]
+    fn transport_flash_is_short_and_distinguishes_pause_from_resume() {
+        let paused = PlaybackView {
+            status: Some(muse_playback::PlaybackStatus {
+                state: PlaybackState::Paused,
+                position: Duration::from_secs(1),
+                duration: Some(Duration::from_secs(30)),
+            }),
+            ..PlaybackView::default()
+        };
+        let playing = PlaybackView {
+            status: Some(muse_playback::PlaybackStatus {
+                state: PlaybackState::Playing,
+                position: Duration::from_secs(1),
+                duration: Some(Duration::from_secs(30)),
+            }),
+            ..PlaybackView::default()
+        };
+        let paused_flash = colon_transport_message(crate::service::Command::Pause, &paused);
+        let resumed_flash = colon_transport_message(crate::service::Command::Pause, &playing);
+        assert_eq!(paused_flash, "paused");
+        assert_eq!(resumed_flash, "resumed");
+        assert_ne!(paused_flash, resumed_flash);
+        for message in [
+            paused_flash,
+            resumed_flash,
+            colon_transport_message(crate::service::Command::Play, &playing),
+            colon_transport_message(crate::service::Command::Load(4), &playing),
+            colon_transport_message(crate::service::Command::Prev, &playing),
+        ] {
+            assert_transport_flash(&message);
+        }
+    }
+
+    #[test]
+    fn space_and_enter_still_play_the_selection() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = App::new(temporary.path().join("library.muse")).unwrap();
+        app.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(
+            app.message.contains("The library is empty"),
+            "{}",
+            app.message
+        );
+        assert_ne!(app.message, "paused");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            app.message.contains("The library is empty"),
+            "{}",
+            app.message
+        );
+        assert_ne!(app.message, "playing");
+    }
+
+    #[test]
+    fn colon_transport_without_a_service_fails_like_volume() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = App::new(temporary.path().join("library.muse")).unwrap();
+        for command in ["pause", "play", "play 1", "prev"] {
+            app.execute_command(command);
+            assert!(
+                app.message.contains("no playback service running"),
+                "{command}: {}",
+                app.message
+            );
+            assert!(
+                app.message
+                    .contains("transport commands need a live playback service"),
+                "{command}: {}",
+                app.message
+            );
+            assert_transport_flash(&app.message);
+        }
+    }
+
+    #[derive(Default)]
+    struct Hold {
+        status: Mutex<Option<muse_playback::PlaybackStatus>>,
+    }
+
+    impl muse_playback::Playback for Hold {
+        type Error = std::io::Error;
+
+        fn load(
+            &mut self,
+            mut source: Box<dyn muse_playback::AudioSource>,
+        ) -> Result<(), Self::Error> {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            source.read_to_end(&mut bytes)?;
+            if bytes.is_empty() {
+                return Err(std::io::Error::other("empty test audio"));
+            }
+            *self.status.lock().unwrap() = Some(muse_playback::PlaybackStatus {
+                state: PlaybackState::Ready,
+                position: Duration::ZERO,
+                duration: Some(Duration::from_secs(30)),
+            });
+            Ok(())
+        }
+
+        fn play(&mut self) -> Result<(), Self::Error> {
+            let state = self
+                .status
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|status| status.state)
+                .ok_or_else(|| std::io::Error::other("no track"))?;
+            if state == PlaybackState::Empty {
+                return Err(std::io::Error::other("no track"));
+            }
+            self.status.lock().unwrap().as_mut().unwrap().state = PlaybackState::Playing;
+            Ok(())
+        }
+
+        fn pause(&mut self) -> Result<(), Self::Error> {
+            let mut guard = self.status.lock().unwrap();
+            let status = guard
+                .as_mut()
+                .ok_or_else(|| std::io::Error::other("no track"))?;
+            if status.state == PlaybackState::Playing {
+                status.state = PlaybackState::Paused;
+            }
+            Ok(())
+        }
+
+        fn stop(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn seek(&mut self, _target: SeekTarget) -> Result<Duration, Self::Error> {
+            Ok(Duration::ZERO)
+        }
+
+        fn status(&self) -> Result<muse_playback::PlaybackStatus, Self::Error> {
+            Ok(self
+                .status
+                .lock()
+                .unwrap()
+                .unwrap_or(muse_playback::PlaybackStatus {
+                    state: PlaybackState::Empty,
+                    position: Duration::ZERO,
+                    duration: None,
+                }))
+        }
+
+        fn set_volume(&mut self, _volume: u8) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    struct Running {
+        path: PathBuf,
+        thread: Option<thread::JoinHandle<Result<(), String>>>,
+    }
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            if let Ok(Some(remote)) = crate::service::Remote::find(&self.path) {
+                let _ = remote.call(crate::service::Command::Shutdown, None);
+            }
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    fn serve(path: PathBuf) -> Running {
+        let library = path.clone();
+        let thread = thread::spawn(move || {
+            crate::service::run_with(&library, |library| {
+                crate::playback::Worker::start_with(library.to_owned(), || Ok(Hold::default()))
+            })
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(Some(remote)) = crate::service::Remote::find(&path)
+                && remote.call(crate::service::Command::Status, None).is_ok()
+            {
+                break;
+            }
+            if thread.is_finished() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "colon playback service did not start"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            crate::service::Remote::find(&path)
+                .ok()
+                .flatten()
+                .and_then(|remote| remote.call(crate::service::Command::Status, None).ok())
+                .is_some(),
+            "colon playback service did not start"
+        );
+        Running {
+            path,
+            thread: Some(thread),
+        }
+    }
+
+    #[test]
+    fn colon_commands_pause_play_and_step_backward() {
+        let temporary = TempDir::new().unwrap();
+        let path = temporary.path().join("library.muse");
+        let mut library = muse_library::Library::open(&path).unwrap();
+        for (name, bytes) in [
+            (
+                "a.mp3",
+                &include_bytes!("../../muse-library/tests/fixtures/silence.mp3")[..],
+            ),
+            (
+                "b.flac",
+                &include_bytes!("../../muse-library/tests/fixtures/tone.flac")[..],
+            ),
+        ] {
+            let file = temporary.path().join(name);
+            std::fs::write(&file, bytes).unwrap();
+            assert_eq!(library.import(&file).imported, 1);
+        }
+        let ids: Vec<_> = library
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|track| track.id)
+            .collect();
+        let night = library.create_playlist("Night").unwrap();
+        assert!(library.add_to_playlist(night.id, ids[0]).unwrap());
+        drop(library);
+        let _running = serve(path.clone());
+        let mut app = App::new(path.clone()).unwrap();
+        app.execute_command("pause");
+        assert_eq!(app.message, "nothing to control");
+        app.execute_command("prev");
+        assert_eq!(app.message, "nothing to control");
+        app.execute_command("play abc");
+        assert!(
+            app.message.contains("positive candidate ID"),
+            "{}",
+            app.message
+        );
+        app.execute_command(&format!("play {}", ids[1]));
+        assert_eq!(app.message, "playing");
+        assert_transport_flash(&app.message);
+        assert_eq!(app.playback_view.current.unwrap().id, ids[1]);
+        assert_eq!(app.playback_view.playlist_index, Some(1));
+        assert_eq!(
+            app.playback_view.status.unwrap().state,
+            PlaybackState::Playing
+        );
+        assert_eq!(app.playback_view.next_index, None);
+        app.execute_command("pause");
+        assert_eq!(app.message, "paused");
+        assert_transport_flash(&app.message);
+        assert_eq!(
+            app.playback_view.status.unwrap().state,
+            PlaybackState::Paused
+        );
+        app.execute_command("pause");
+        assert_eq!(app.message, "paused");
+        assert_eq!(
+            app.playback_view.status.unwrap().state,
+            PlaybackState::Paused
+        );
+        app.execute_command("play");
+        assert_eq!(app.message, "playing");
+        assert_eq!(
+            app.playback_view.status.unwrap().state,
+            PlaybackState::Playing
+        );
+        app.execute_command("prev");
+        assert_eq!(app.message, "prev");
+        assert_transport_flash(&app.message);
+        assert_eq!(app.playback_view.current.unwrap().id, ids[0]);
+        assert_eq!(app.playback_view.playlist_index, Some(0));
+        assert_eq!(app.playback_view.next_index, Some(1));
+        assert_eq!(app.playback_view.next_track_id, Some(ids[1]));
+        let shown = screen(&mut app, 120, 24);
+        assert!(shown.contains("prev"), "{shown}");
+        assert!(!shown.contains("Prev:"), "{shown}");
+        app.execute_command("prev");
+        assert_eq!(app.message, "start of playlist");
+        let remote = crate::service::Remote::find(&path).unwrap().unwrap();
+        let stayed = remote.call(crate::service::Command::Status, None).unwrap();
+        assert_eq!(stayed.current.unwrap().id, ids[0]);
+        assert_eq!(stayed.playlist_index, Some(0));
+        assert_eq!(stayed.next_index, Some(1));
+        remote
+            .call(crate::service::Command::PlayPlaylist(night.id), None)
+            .unwrap();
+        app.execute_command(&format!("play {}", ids[1]));
+        assert!(
+            app.message.contains("not in the current playlist"),
+            "{}",
+            app.message
+        );
+        assert!(!app.message.contains("does not exist"), "{}", app.message);
+        app.execute_command("play 999999");
+        assert!(app.message.contains("does not exist"), "{}", app.message);
+        assert!(
+            !app.message.contains("not in the current playlist"),
+            "{}",
+            app.message
+        );
+        let after = remote.call(crate::service::Command::Status, None).unwrap();
+        assert_eq!(after.current.unwrap().id, ids[0]);
+        assert_eq!(after.playlist_id, Some(night.id));
     }
 
     #[test]
