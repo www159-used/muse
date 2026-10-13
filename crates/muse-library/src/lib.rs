@@ -9,6 +9,7 @@ mod upgrade;
 
 pub use netease::{ImportIssue, ImportPhase, ImportProgress, ImportReport};
 pub use storage::{
-    Attachment, AttachmentKind, AttachmentObservation, Library, LibraryDescriptor, LibraryError,
-    LibraryKind, SongGroup, SourceObservation, Track,
+    ALL_LOCAL_PLAYLIST, Attachment, AttachmentKind, AttachmentObservation, Library,
+    LibraryDescriptor, LibraryError, LibraryKind, Playlist, PlaylistKind, SCHEMA_VERSION,
+    SongGroup, SourceObservation, Track,
 };

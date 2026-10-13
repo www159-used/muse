@@ -149,12 +149,16 @@ pub(crate) fn check_schema(connection: &Connection) -> Result<(), LibraryError> 
             "unsupported schema version {version}"
         )));
     }
-    if version == 2 {
+    if version >= 2 {
         connection.prepare("SELECT name,kind FROM library_descriptor WHERE singleton=1")?;
         connection.prepare("SELECT tagged_title,tagged_artist FROM tracks LIMIT 0")?;
         connection.prepare("SELECT verified FROM import_sources LIMIT 0")?;
         connection.prepare("SELECT source_hash,path,container,title,artist,album,netease_id,content_hash FROM source_observations LIMIT 0")?;
         connection.prepare("SELECT track_id,source_hash,kind,content_hash,mime_type,data,attribution FROM attachment_observations LIMIT 0")?;
+    }
+    if version >= 3 {
+        connection.prepare("SELECT id, name, kind FROM playlists LIMIT 0")?;
+        connection.prepare("SELECT playlist_id, position, track_id FROM playlist_items LIMIT 0")?;
     }
     for query in [
         "SELECT id, title, artist, album, format, duration_ms, netease_id, content_hash FROM tracks LIMIT 0",

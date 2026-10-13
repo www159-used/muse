@@ -61,24 +61,28 @@ impl Library {
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         crate::backup::check_schema(&connection)?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version == 2 {
+        if version == crate::SCHEMA_VERSION {
             return Ok(None);
         }
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(std::io::Error::other)?
             .as_nanos();
+        let label = if version == 1 { "pre-v2" } else { "pre-v3" };
         let mut name = path.as_os_str().to_os_string();
-        name.push(format!(".pre-v2.{suffix}.muse"));
+        name.push(format!(".{label}.{suffix}.muse"));
         let backup = PathBuf::from(name);
         crate::backup::copy_to_new(&connection, &backup)?;
         connection.pragma_update(None, "foreign_keys", "OFF")?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Exclusive)?;
-        tx.execute_batch(include_str!("schema-v2.sql"))?;
-        tx.execute(
-            "INSERT INTO library_descriptor VALUES(1,?1,'netease')",
-            [default_name(path)],
-        )?;
+        if version == 1 {
+            tx.execute_batch(include_str!("schema-v2.sql"))?;
+            tx.execute(
+                "INSERT INTO library_descriptor VALUES(1,?1,'netease')",
+                [default_name(path)],
+            )?;
+        }
+        tx.execute_batch(include_str!("schema-v3.sql"))?;
         crate::backup::check_integrity(&tx)?;
         tx.commit()?;
         Ok(Some(backup))
