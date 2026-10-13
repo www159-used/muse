@@ -24,6 +24,11 @@ fn play_playlist(world: &mut ImportWorld, name: String) -> Result<()> {
     world.play_playlist(&name)
 }
 
+#[when(expr = "I play the track from fixture {string}")]
+fn play_fixture(world: &mut ImportWorld, fixture: String) -> Result<()> {
+    world.play_fixture(&fixture)
+}
+
 #[when("I advance to the next track")]
 fn advance(world: &mut ImportWorld) -> Result<()> {
     world.advance()

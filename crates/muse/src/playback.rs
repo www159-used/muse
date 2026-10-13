@@ -155,19 +155,27 @@ fn upcoming(session: &PlaylistSession) -> Option<(usize, i64)> {
     Some((index, *session.order.get(index)?))
 }
 
-/// Where playback continues after `anchor` when the current track ends.
-fn continuation_index(session: &PlaylistSession, anchor: usize) -> Option<usize> {
-    if anchor >= session.order.len() {
+/// 0-based playlist position of the track that plays when the one at `index` ends.
+/// Sequential playback has no follower on the last track. Track ids are not positions.
+pub(crate) fn follower_index(mode: RepeatMode, index: u32, len: u32) -> Option<u32> {
+    if len == 0 || index >= len {
         return None;
     }
-    match session.mode {
-        RepeatMode::Track => Some(anchor),
+    match mode {
+        RepeatMode::Track => Some(index),
         RepeatMode::Sequential => {
-            let next = anchor.saturating_add(1);
-            (next < session.order.len()).then_some(next)
+            let next = index.saturating_add(1);
+            (next < len).then_some(next)
         }
-        RepeatMode::List => Some(anchor.saturating_add(1) % session.order.len()),
+        RepeatMode::List => Some(index.saturating_add(1) % len),
     }
+}
+
+/// Where playback continues after `anchor` when the current track ends.
+fn continuation_index(session: &PlaylistSession, anchor: usize) -> Option<usize> {
+    let index = u32::try_from(anchor).ok()?;
+    let len = u32::try_from(session.order.len()).ok()?;
+    follower_index(session.mode, index, len).and_then(|next| usize::try_from(next).ok())
 }
 struct Request {
     expected: Option<Current>,
@@ -1000,5 +1008,76 @@ mod tests {
         assert_eq!(continued.current.unwrap().id, ids[1]);
         assert_eq!(continued.playlist_index, Some(1));
         assert_eq!(continued.mode, RepeatMode::Sequential);
+    }
+
+    #[test]
+    fn sequential_follower_is_the_next_position_until_the_last_track() {
+        assert_eq!(follower_index(RepeatMode::Sequential, 113, 168), Some(114));
+        assert_eq!(follower_index(RepeatMode::Sequential, 167, 168), None);
+        assert_eq!(follower_index(RepeatMode::List, 167, 168), Some(0));
+        assert_eq!(follower_index(RepeatMode::Track, 113, 168), Some(113));
+        assert_eq!(follower_index(RepeatMode::Sequential, 0, 0), None);
+    }
+
+    #[test]
+    fn load_in_the_middle_follows_playlist_position_when_ids_have_gaps() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let path = temporary.path().join("library.muse");
+        let mut library = Library::open(&path).unwrap();
+        for (name, bytes) in [
+            (
+                "a.mp3",
+                &include_bytes!("../../muse-library/tests/fixtures/silence.mp3")[..],
+            ),
+            (
+                "b.flac",
+                &include_bytes!("../../muse-library/tests/fixtures/tone.flac")[..],
+            ),
+            (
+                "c.mp3",
+                &include_bytes!("../../muse-e2e/fixtures/tagged.mp3")[..],
+            ),
+            (
+                "d.mp3",
+                &include_bytes!("../../muse-e2e/fixtures/other-artist.mp3")[..],
+            ),
+        ] {
+            let file = temporary.path().join(name);
+            std::fs::write(&file, bytes).unwrap();
+            assert_eq!(library.import(&file).imported, 1);
+        }
+        let removed = library.list().unwrap()[2].id;
+        assert!(library.remove(removed).unwrap());
+        let tracks = library
+            .playlist_tracks(library.all_local().unwrap().id)
+            .unwrap();
+        assert_eq!(tracks.len(), 3);
+        assert_ne!(
+            tracks[2].id,
+            tracks[1].id.saturating_add(1),
+            "the follower id must not be current id + 1"
+        );
+        let playlist = library.all_local().unwrap().id;
+        drop(library);
+        let worker = Worker::start_with(path, || {
+            Ok(Scripted {
+                status: Mutex::new(PlaybackStatus {
+                    state: PlaybackState::Empty,
+                    position: Duration::ZERO,
+                    duration: None,
+                }),
+                finish: Arc::new(AtomicBool::new(false)),
+                loads: Arc::new(Mutex::new(Vec::new())),
+                plays: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            })
+        });
+        let view = worker.execute(Action::Load(tracks[1].id), None).unwrap();
+        assert_eq!(view.playlist_id, Some(playlist));
+        assert_eq!(view.playlist_index, Some(1));
+        assert_eq!(view.playlist_len, 3);
+        assert_eq!(view.mode, RepeatMode::Sequential);
+        assert_eq!(view.next_index, Some(2));
+        assert_eq!(view.next_track_id, Some(tracks[2].id));
+        assert_ne!(view.next_track_id, Some(removed));
     }
 }

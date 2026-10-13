@@ -1621,20 +1621,54 @@ impl App {
     }
 
     fn next_hint(&self) -> String {
-        match self.playback_view.next_track_id {
-            Some(id) => {
-                let title = self
-                    .groups
-                    .iter()
-                    .flat_map(|group| group.candidates.iter())
-                    .chain(self.tracks.iter())
-                    .find(|track| track.id == id)
-                    .map(|track| track.title.as_str())
-                    .unwrap_or("unknown");
-                format!("next: {title}")
-            }
-            None => "next: none".into(),
+        let explicit = self.playback_view.next_index;
+        let next_index = explicit.or_else(|| {
+            self.playback_view.playlist_index.and_then(|index| {
+                crate::playback::follower_index(
+                    self.playback_view.mode,
+                    index,
+                    self.playback_view.playlist_len,
+                )
+            })
+        });
+        let Some(next_index) = next_index else {
+            return "next: none".into();
+        };
+        if explicit.is_some()
+            && let Some(title) = self
+                .playback_view
+                .next_track_id
+                .and_then(|id| self.known_title(id))
+        {
+            return format!("next: {title}");
         }
+        let title = self
+            .title_at_playlist_index(next_index)
+            .unwrap_or_else(|| "unknown".into());
+        format!("next: {title}")
+    }
+
+    fn known_title(&self, id: i64) -> Option<String> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.candidates.iter())
+            .chain(self.tracks.iter())
+            .find(|track| track.id == id)
+            .map(|track| track.title.clone())
+    }
+
+    fn title_at_playlist_index(&self, index: u32) -> Option<String> {
+        let playlist_id = self
+            .playback_view
+            .playlist_id
+            .or_else(|| self.library.all_local().ok().map(|playlist| playlist.id))?;
+        let index = usize::try_from(index).ok()?;
+        self.library
+            .playlist_tracks(playlist_id)
+            .ok()?
+            .into_iter()
+            .nth(index)
+            .map(|track| track.title)
     }
 
     fn draw_lyrics_top(&self, frame: &mut Frame, area: Rect) {
@@ -3750,6 +3784,44 @@ mod tests {
             .lines()
             .position(|line| line.contains(text))
             .unwrap_or_else(|| panic!("missing lyric {text}"))
+    }
+
+    #[test]
+    fn status_hint_names_the_following_track_when_the_snapshot_omits_it() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = App::new(temporary.path().join("library.muse")).unwrap();
+        let first = temporary.path().join("one.mp3");
+        let second = temporary.path().join("two.flac");
+        std::fs::write(
+            &first,
+            include_bytes!("../../muse-library/tests/fixtures/silence.mp3"),
+        )
+        .unwrap();
+        std::fs::write(
+            &second,
+            include_bytes!("../../muse-library/tests/fixtures/tone.flac"),
+        )
+        .unwrap();
+        assert_eq!(app.library.import(&first).imported, 1);
+        assert_eq!(app.library.import(&second).imported, 1);
+        app.reload_browser().unwrap();
+        let playlist = app.library.all_local().unwrap();
+        app.playback_view.playlist_id = Some(playlist.id);
+        app.playback_view.playlist_name = playlist.name;
+        app.playback_view.playlist_len = 2;
+        app.playback_view.playlist_index = Some(0);
+        app.playback_view.mode = crate::playback::RepeatMode::Sequential;
+        app.playback_view.next_index = None;
+        app.playback_view.next_track_id = None;
+        app.playback_view.status = Some(muse_playback::PlaybackStatus {
+            state: PlaybackState::Playing,
+            position: Duration::from_secs(1),
+            duration: Some(Duration::from_secs(3)),
+        });
+        assert_eq!(app.next_hint(), format!("next: {}", app.tracks[1].title));
+        assert!(screen(&mut app, 120, 24).contains(&format!("next: {}", app.tracks[1].title)));
+        app.playback_view.playlist_index = Some(1);
+        assert_eq!(app.next_hint(), "next: none");
     }
 
     #[test]

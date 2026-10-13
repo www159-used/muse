@@ -236,6 +236,11 @@ impl ImportWorld {
         self.session()?.run(&["playlist", "play", name])
     }
 
+    pub fn play_fixture(&mut self, fixture: &str) -> Result<()> {
+        let id = self.track_for_fixture(fixture)?.id;
+        self.session()?.run(&["play", &id.to_string()])
+    }
+
     pub fn advance(&mut self) -> Result<()> {
         self.session()?.run(&["next"])
     }

@@ -21,7 +21,7 @@ Start with [repeat-import.feature](scenarios/import/repeat-import.feature): impo
 | [All-local playback](scenarios/playlist/all-local-play.feature) | Playing 全部本地 starts sequential playback of the imported tracks. |
 | [Sequential stop](scenarios/playlist/sequential-stop.feature) | Next walks the playlist and a further next fails on the last track. |
 | [Repeat modes](scenarios/playlist/repeat-modes.feature) | Cycling mode walks sequential, list loop, and single loop. |
-| [Next track](scenarios/playlist/next-track.feature) | Status shows the upcoming track, no next track after the last sequential track, and play-next-once stays on 全部本地. |
+| [Next track](scenarios/playlist/next-track.feature) | Status shows the upcoming track, including a track in the middle of the playlist; only the last sequential track has no next. Play-next-once stays on 全部本地. |
 | [Import feedback](scenarios/import/import-feedback.feature) | A corrupt file is reported, a fixed file imports on retry, and an empty folder adds nothing. |
 
 Every import checks added/duplicate counts, rejects unexpected failures or issues, verifies library audio against independent fixtures and checks that all prepared source files remain unchanged. Track tables describe the complete library and match each row once without depending on import order.
@@ -58,6 +58,7 @@ The feature describes user actions and observable outcomes. [Cucumber's step att
 | `And the imported track has a PNG cover matching "cover.png"` | [track_cover](tests/steps/then.rs) checks one cover, its MIME type and exact fixture bytes. |
 | `And the imported track has these lyrics:` | [track_lyrics](tests/steps/then.rs) checks one lyrics attachment, its MIME type and the literal docstring bytes. |
 | `When I play the playlist "全部本地"` | [play_playlist](tests/steps/when.rs) asks the shared playback service to start that playlist. |
+| `When I play the track from fixture "tone.flac"` | [play_fixture](tests/steps/when.rs) starts that imported track with `play`. |
 | `When I advance to the next track` | [advance](tests/steps/when.rs) runs `next` and requires it to succeed. |
 | `When I try to advance past the last track` | [try_advance](tests/steps/when.rs) runs `next` and records whether it failed. |
 | `When I cycle the playback mode` | [cycle_mode](tests/steps/when.rs) cycles sequential, list loop, and single loop. |
