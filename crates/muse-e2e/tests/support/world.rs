@@ -159,6 +159,22 @@ impl ImportWorld {
         self.session()?.run(&["mode"])
     }
 
+    pub fn volume(&mut self, args: &[&str]) -> Result<()> {
+        self.session()?.run(args)
+    }
+
+    pub fn volume_output(&mut self, args: &[&str]) -> Result<std::process::Output> {
+        self.session()?.output(args)
+    }
+
+    pub fn restart_playback(&mut self) -> Result<()> {
+        self.session()?.restart()
+    }
+
+    pub fn shutdown_playback(&mut self) -> Result<()> {
+        self.session()?.shutdown()
+    }
+
     pub fn expect_advance_failed(&self) -> Result<()> {
         self.playback
             .as_ref()

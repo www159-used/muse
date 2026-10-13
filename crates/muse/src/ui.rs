@@ -877,6 +877,10 @@ impl App {
                 self.playlist_command(rest);
                 return;
             }
+            Some((BuiltinCommand::Volume, rest)) => {
+                self.volume_command(rest);
+                return;
+            }
             None => {
                 self.message = format!("Unknown command: {input}");
                 return;
@@ -1002,6 +1006,26 @@ impl App {
         } else {
             self.playback_view.mode = self.playback_view.mode.cycle();
             self.message = format!("Playback mode: {}", self.playback_view.mode.label());
+        }
+    }
+
+    fn volume_command(&mut self, rest: &str) {
+        let args: Vec<std::ffi::OsString> = rest.split_whitespace().map(Into::into).collect();
+        match crate::operations::volume(&self.library_path, &args) {
+            Ok(output) => {
+                if let Some(percent) = output
+                    .text
+                    .lines()
+                    .next()
+                    .and_then(|line| line.strip_prefix("Volume: "))
+                    .and_then(|line| line.strip_suffix('%'))
+                    .and_then(|line| line.parse().ok())
+                {
+                    self.playback_view.volume = percent;
+                }
+                self.message = output.text.replace('\n', " | ");
+            }
+            Err(error) => self.message = error,
         }
     }
 
@@ -1518,6 +1542,7 @@ impl App {
     }
 
     fn playback_line(&self) -> String {
+        let volume = format!("vol: {}%", self.playback_view.volume);
         let playlist = if self.playback_view.playlist_name.is_empty() {
             match &self.browser {
                 Browser::Playlist { name, .. } => name.clone(),
@@ -1528,13 +1553,13 @@ impl App {
         };
         let mode = self.playback_view.mode.label();
         if let Some(error) = &self.playback_view.error {
-            return format!("Playback error: {error} | {playlist} | {mode}");
+            return format!("Playback error: {error} | {playlist} | {mode} | {volume}");
         }
         if self.playback_view.pending.is_some() {
-            return format!("Loading track... | {playlist} | {mode}");
+            return format!("Loading track... | {playlist} | {mode} | {volume}");
         }
         let Some(status) = self.playback_view.status else {
-            return format!("Not playing | {playlist} | {mode}");
+            return format!("Not playing | {playlist} | {mode} | {volume}");
         };
         let state = match status.state {
             PlaybackState::Empty => "Empty",
@@ -1560,7 +1585,7 @@ impl App {
             })
             .map(|track| track.title.as_str())
             .unwrap_or("");
-        format!("{state} {title} {position}/{total} | {playlist} | {mode}")
+        format!("{state} {title} {position}/{total} | {playlist} | {mode} | {volume}")
     }
 
     fn draw_lyrics_top(&self, frame: &mut Frame, area: Rect) {
@@ -3084,10 +3109,10 @@ mod tests {
         assert!(!rendered.contains("Paths"));
         assert!(rendered.lines().last().unwrap().starts_with(" COMMAND "));
         for command in ["import", "q", "quit", "stop", "detach", "playlist"] {
-            assert!(rendered.contains(command));
+            assert!(rendered.contains(command), "{rendered}");
         }
         app.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert_eq!(app.command.as_ref().unwrap().text(), "playlist");
+        assert_eq!(app.command.as_ref().unwrap().text(), "volume");
         app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.command.as_ref().unwrap().text(), "import");
         for (width, height) in [(16, 4), (1, 1)] {
@@ -3190,7 +3215,30 @@ mod tests {
         assert!(text.contains(":import"));
         assert!(text.contains("MP3, FLAC or NCM file or folder"));
         assert!(text.contains("Not playing"));
+        assert!(text.contains("vol: 100%"));
+        assert!(!text.contains("Gain:"));
         assert!(!text.contains("Playing"));
+    }
+
+    #[test]
+    fn status_bar_shows_the_ui_volume_and_offline_volume_commands_fail() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = App::new(temporary.path().join("library.muse")).unwrap();
+        app.playback_view.volume = 37;
+        let rendered = screen(&mut app, 100, 24);
+        assert!(rendered.contains("vol: 37%"), "{rendered}");
+        assert!(!rendered.contains("Gain:"), "{rendered}");
+        app.execute_command("volume");
+        assert!(
+            app.message.contains("no playback service running"),
+            "{}",
+            app.message
+        );
+        app.execute_command("volume set 999");
+        assert!(app.message.contains("out of range"), "{}", app.message);
+        app.execute_command("volume inc abc");
+        assert!(app.message.contains("abc"), "{}", app.message);
+        assert_eq!(app.playback_view.volume, 37);
     }
 
     #[test]
@@ -3257,7 +3305,11 @@ mod tests {
         }
         let rendered = screen(&mut app, 100, 24);
         assert!(rendered.contains("Scanning: 3 audio files found"));
-        assert!(!rendered.contains('%'));
+        assert!(
+            !rendered.contains("%)"),
+            "scanning must not invent an import percentage: {rendered}"
+        );
+        assert!(rendered.contains("vol: 100%"));
         {
             let mut latest = progress.lock().unwrap();
             let snapshot = latest.as_mut().unwrap();

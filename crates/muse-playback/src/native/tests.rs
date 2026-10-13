@@ -1,14 +1,72 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
+use crate::perceptual_gain;
 use std::{
     cell::Cell,
     io::{self, Cursor, Read, Seek, SeekFrom},
+    sync::atomic::AtomicU32,
     time::Instant,
 };
 
+fn unity_gain() -> Arc<AtomicU32> {
+    Arc::new(AtomicU32::new(perceptual_gain(100).to_bits()))
+}
+
 const MP3: &[u8] = include_bytes!("../../../muse-library/tests/fixtures/silence.mp3");
 const FLAC: &[u8] = include_bytes!("../../../muse-library/tests/fixtures/tone.flac");
+
+#[test]
+fn half_volume_uses_square_law_gain_on_submitted_samples() {
+    assert_eq!(perceptual_gain(0), 0.0);
+    assert_eq!(perceptual_gain(100), 1.0);
+    assert_eq!(perceptual_gain(50), 0.25);
+
+    let (mut player, _) = NativePlayback::offline();
+    player.set_volume(50).unwrap();
+    let applied = f32::from_bits(player.shared.gain.load(Ordering::Acquire));
+    assert_eq!(applied, 0.25);
+    player.set_volume(0).unwrap();
+    assert_eq!(
+        f32::from_bits(player.shared.gain.load(Ordering::Acquire)),
+        0.0
+    );
+    player.set_volume(200).unwrap();
+    assert_eq!(
+        f32::from_bits(player.shared.gain.load(Ordering::Acquire)),
+        1.0,
+        "gain clamps at unity and does not amplify"
+    );
+    player.set_volume(50).unwrap();
+
+    let session = Arc::new(Session::new(
+        PlaybackState::Playing,
+        Timeline {
+            anchor: Duration::ZERO,
+            rate: 44_100,
+            duration: None,
+            failure: None,
+        },
+        true,
+    ));
+    let (mut producer, consumer) = RingBuffer::new(4);
+    producer.push_entire_slice(&[1.0, -1.0, 0.5, -0.5]).unwrap();
+    let mut source = PcmSource::new(
+        Arc::clone(&session),
+        Arc::new(DeviceFault::default()),
+        consumer,
+        1,
+        44_100,
+        Arc::clone(&player.shared.gain),
+    );
+    let actual: Vec<f32> = (0..4).map(|_| source.next().unwrap()).collect();
+    for (got, expected) in actual.iter().zip([0.25, -0.25, 0.125, -0.125]) {
+        assert!(
+            (got - expected).abs() < 1.0e-6,
+            "set 50 must apply gain 0.25, got {got} want {expected}"
+        );
+    }
+}
 
 #[test]
 fn prepared_surround_audio_survives_status_lock_contention() {
@@ -31,6 +89,7 @@ fn prepared_surround_audio_survives_status_lock_contention() {
         consumer,
         6,
         44_100,
+        unity_gain(),
     );
     let guard = lock(&session.timeline);
     let actual = std::array::from_fn::<_, 6, _>(|_| source.next().unwrap());
@@ -64,6 +123,7 @@ fn concurrent_pause_freezes_submitted_audio_position() {
         consumer,
         1,
         44_100,
+        unity_gain(),
     );
     let done = AtomicBool::new(false);
     let changed = thread::scope(|scope| {
@@ -223,6 +283,7 @@ fn bounded_preload_bad_candidate_and_playing_seek() {
             session: Mutex::new(None),
             device: Mutex::new(Arc::new(DeviceFault::default())),
             alive: AtomicBool::new(true),
+            gain: unity_gain(),
         }),
     };
     engine

@@ -208,3 +208,94 @@ fn track_index(world: &mut ImportWorld, index: usize, len: usize) -> Result<()> 
 fn advancing_fails(world: &mut ImportWorld) -> Result<()> {
     world.expect_advance_failed()
 }
+
+#[then(expr = "the playback volume is {string}")]
+fn playback_volume(world: &mut ImportWorld, volume: String) -> Result<()> {
+    assert_eq!(world.status_line("Volume")?, volume, "playback volume");
+    Ok(())
+}
+
+#[then(expr = "the playback gain is {string}")]
+fn playback_gain(world: &mut ImportWorld, gain: String) -> Result<()> {
+    assert_eq!(world.status_line("Gain")?, gain, "playback gain");
+    Ok(())
+}
+
+#[then("the volume command reports the same volume and gain")]
+fn volume_matches_status(world: &mut ImportWorld) -> Result<()> {
+    let volume = world.status_line("Volume")?;
+    let gain = world.status_line("Gain")?;
+    let output = world.volume_output(&["volume"])?;
+    let text = String::from_utf8(output.stdout)?;
+    assert!(
+        output.status.success(),
+        "volume query failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.lines().any(|line| line == format!("Volume: {volume}")),
+        "volume command drifted from status:\n{text}"
+    );
+    assert!(
+        text.lines().any(|line| line == format!("Gain: {gain}")),
+        "gain command drifted from status:\n{text}"
+    );
+    Ok(())
+}
+
+#[then("the status names a volume file")]
+fn volume_file(world: &mut ImportWorld) -> Result<()> {
+    let path = world.status_line("Volume file")?;
+    let stored: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+    let volume = world.status_line("Volume")?;
+    let percent = volume.trim_end_matches('%');
+    assert_eq!(
+        stored["volume"].to_string(),
+        percent,
+        "volume file {path} does not match status"
+    );
+    Ok(())
+}
+
+#[then(expr = "setting the playback volume to {int} fails")]
+fn set_volume_fails(world: &mut ImportWorld, volume: usize) -> Result<()> {
+    let output = world.volume_output(&["volume", "set", &volume.to_string()])?;
+    assert!(!output.status.success(), "set {volume} was accepted");
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("out of range"), "{error}");
+    assert!(error.contains('0') && error.contains("100"), "{error}");
+    Ok(())
+}
+
+#[then(expr = "increasing the playback volume by {string} fails")]
+fn increase_volume_fails(world: &mut ImportWorld, steps: String) -> Result<()> {
+    let output = world.volume_output(&["volume", "inc", &steps])?;
+    assert!(!output.status.success(), "inc {steps} was accepted");
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains(&steps), "{error}");
+    assert!(error.contains("integer"), "{error}");
+    Ok(())
+}
+
+#[then("the volume command fails because playback is not running")]
+fn volume_requires_service(world: &mut ImportWorld) -> Result<()> {
+    for args in [
+        vec!["volume"],
+        vec!["volume", "set", "10"],
+        vec!["volume", "inc", "1"],
+        vec!["volume", "dec", "1"],
+    ] {
+        let output = world.volume_output(&args)?;
+        assert!(!output.status.success(), "{args:?} was accepted");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("no playback service running"),
+            "{args:?}: {error}"
+        );
+        assert!(
+            !error.contains("Volume:"),
+            "{args:?} invented a volume reading: {error}"
+        );
+    }
+    Ok(())
+}

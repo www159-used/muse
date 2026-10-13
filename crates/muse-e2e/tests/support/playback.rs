@@ -23,19 +23,7 @@ impl Session {
         let muse = muse_binary()?;
         let runtime = directory.join("runtime");
         let log = directory.join("service.log");
-        let log_file = fs::File::create(&log)?;
-        let mut command = Command::new(std::env::current_exe()?);
-        command
-            .env("MUSE_E2E_CLOCK", "1")
-            .env("MUSE_TEST_CHILD_LIBRARY", &library)
-            .env("MUSE_RUNTIME_DIR", &runtime);
-        // setsid first; that helper also clears stdio, so restore the log afterwards.
-        crate::service::detached_process(&mut command);
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log_file.try_clone()?))
-            .stderr(Stdio::from(log_file));
-        let child = command.spawn()?;
+        let child = spawn_service(&library, &runtime, &log)?;
         let mut session = Self {
             child,
             library,
@@ -55,6 +43,43 @@ impl Session {
         } else {
             Err(command_failure(args, &output).into())
         }
+    }
+
+    pub fn output(&self, args: &[&str]) -> Result<Output> {
+        self.command(args)
+    }
+
+    pub fn restart(&mut self) -> Result<()> {
+        let _ = self.command(&["shutdown"]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if self.child.try_wait()?.is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        self.child = spawn_service(&self.library, &self.runtime, &self.log)?;
+        self.wait_ready()
+    }
+
+    pub fn shutdown(&mut self) -> Result<()> {
+        let output = self.command(&["shutdown"])?;
+        if !output.status.success() {
+            return Err(command_failure(&["shutdown"], &output).into());
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.child.try_wait()?.is_none() {
+            if Instant::now() >= deadline {
+                return Err("playback service did not exit after shutdown".into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        Ok(())
     }
 
     pub fn attempt(&mut self, args: &[&str]) -> Result<()> {
@@ -132,6 +157,22 @@ impl Drop for Session {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+fn spawn_service(library: &Path, runtime: &Path, log: &Path) -> Result<Child> {
+    let log_file = fs::File::create(log)?;
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .env("MUSE_E2E_CLOCK", "1")
+        .env("MUSE_TEST_CHILD_LIBRARY", library)
+        .env("MUSE_RUNTIME_DIR", runtime);
+    // setsid first; that helper also clears stdio, so restore the log afterwards.
+    crate::service::detached_process(&mut command);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log_file.try_clone()?))
+        .stderr(Stdio::from(log_file));
+    Ok(command.spawn()?)
 }
 
 fn muse_binary() -> Result<PathBuf> {

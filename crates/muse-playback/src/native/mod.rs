@@ -6,7 +6,7 @@ mod output;
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     thread::{self, JoinHandle},
@@ -17,7 +17,7 @@ use rtrb::{Producer, RingBuffer};
 
 use crate::{
     AudioSource, Playback, PlaybackError, PlaybackErrorKind as Kind, PlaybackState, PlaybackStatus,
-    SeekTarget,
+    SeekTarget, perceptual_gain,
 };
 use decode::{Decoded, OwnedReader};
 use output::{DeviceFault, Output, PcmSource, Session, Timeline, lock};
@@ -26,6 +26,9 @@ struct Shared {
     session: Mutex<Option<Arc<Session>>>,
     device: Mutex<Arc<DeviceFault>>,
     alive: AtomicBool,
+    /// Square-law amplitude from [`perceptual_gain`], as `f32` bits. Sample
+    /// scaling reads this; device volume is left alone.
+    gain: Arc<AtomicU32>,
 }
 
 impl Shared {
@@ -98,6 +101,7 @@ impl NativePlayback {
             session: Mutex::new(None),
             device: Mutex::new(Arc::new(DeviceFault::default())),
             alive: AtomicBool::new(true),
+            gain: Arc::new(AtomicU32::new(perceptual_gain(100).to_bits())),
         });
         let (commands, receiver) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -186,6 +190,12 @@ impl Playback for NativePlayback {
     fn status(&self) -> Result<PlaybackStatus, Self::Error> {
         self.shared.status()
     }
+    fn set_volume(&mut self, volume: u8) -> Result<(), Self::Error> {
+        self.shared
+            .gain
+            .store(perceptual_gain(volume).to_bits(), Ordering::Release);
+        Ok(())
+    }
 }
 
 impl Drop for NativePlayback {
@@ -262,6 +272,7 @@ impl Engine {
             consumer,
             decoded.channels,
             decoded.rate,
+            Arc::clone(&self.shared.gain),
         ));
         *lock(&self.shared.session) = Some(Arc::clone(&session));
         self.session = Some(session);

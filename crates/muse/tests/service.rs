@@ -8,6 +8,9 @@ mod playback;
 mod service;
 #[path = "support/service.rs"]
 mod support;
+#[allow(dead_code)]
+#[path = "../src/volume.rs"]
+mod volume;
 
 use serde_json::json;
 use std::{
@@ -20,6 +23,53 @@ use support::{Session, cli, success};
 #[ignore = "child process entry point used by integration tests"]
 fn service_child() {
     support::child();
+}
+
+#[test]
+fn volume_set_inc_dec_persist_and_reject_a_dead_service() {
+    let mut session = Session::new();
+    let initial = session.status();
+    assert!(initial.contains("Volume: 100%"));
+    assert!(initial.contains("Gain: 1.0000"));
+    assert!(initial.contains("Volume file: "));
+    let range = cli(&session.directory, &["volume", "set", "999"]);
+    assert!(!range.status.success());
+    assert!(String::from_utf8_lossy(&range.stderr).contains("out of range"));
+    let format = cli(&session.directory, &["volume", "inc", "abc"]);
+    assert!(!format.status.success());
+    assert!(String::from_utf8_lossy(&format.stderr).contains("abc"));
+    assert!(session.status().contains("Volume: 100%"));
+    let set = success(cli(&session.directory, &["volume", "set", "50"]));
+    assert!(set.contains("Volume: 50%"));
+    assert!(set.contains("Gain: 0.2500"));
+    assert!(session.status().contains("Volume: 50%\nGain: 0.2500"));
+    success(cli(&session.directory, &["volume", "inc", "60"]));
+    assert!(session.status().contains("Volume: 100%"));
+    success(cli(&session.directory, &["volume", "dec", "1000"]));
+    let muted = session.status();
+    assert!(muted.contains("Volume: 0%"));
+    assert!(muted.contains("Gain: 0.0000"));
+    success(cli(&session.directory, &["volume", "set", "50"]));
+    let path = session.directory.path().join("library.muse");
+    success(cli(&session.directory, &["shutdown"]));
+    assert!(session.child.wait().unwrap().success());
+    for args in [
+        vec!["volume"],
+        vec!["volume", "set", "10"],
+        vec!["volume", "inc", "1"],
+        vec!["volume", "dec", "1"],
+    ] {
+        let down = cli(&session.directory, &args);
+        assert!(!down.status.success(), "{args:?}");
+        let error = String::from_utf8_lossy(&down.stderr);
+        assert!(error.contains("no playback service running"), "{error}");
+        assert!(!error.contains("Volume:"), "{error}");
+    }
+    session.child = support::launch(&session.directory, &path);
+    support::wait_ready(&session.directory);
+    let restored = session.status();
+    assert!(restored.contains("Volume: 50%"));
+    assert!(restored.contains("Gain: 0.2500"));
 }
 
 #[test]
@@ -82,6 +132,10 @@ fn empty_observation_and_invalid_commands_have_no_side_effects() {
         vec!["play", "0"],
         vec!["stop", "extra"],
         vec!["pause", "--backup", "copy.muse"],
+        vec!["volume"],
+        vec!["volume", "set", "10"],
+        vec!["volume", "set", "999"],
+        vec!["volume", "inc", "abc"],
     ] {
         assert!(!cli(&directory, &args).status.success(), "{args:?}");
     }

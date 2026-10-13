@@ -9,6 +9,7 @@ mod repl;
 mod search;
 mod service;
 mod ui;
+mod volume;
 
 use std::{ffi::OsString, io::IsTerminal, path::PathBuf, process::ExitCode};
 
@@ -19,6 +20,7 @@ enum Action {
     Service(PathBuf),
     Library(PathBuf, Vec<OsString>),
     Control(PathBuf, service::Command),
+    Volume(PathBuf, Vec<OsString>),
     Backup {
         source: PathBuf,
         destination: PathBuf,
@@ -94,6 +96,13 @@ fn arguments(mut arguments: impl Iterator<Item = OsString>) -> Result<Action, St
                 return Err("specify one operation".into());
             }
             internal_service = true;
+        } else if argument == "volume" {
+            if operation.is_some() || control.is_some() || internal_service {
+                return Err(
+                    "maintenance, playback and service operations cannot be combined".into(),
+                );
+            }
+            return Ok(Action::Volume(library, arguments.collect()));
         } else if matches!(
             argument.to_str(),
             Some("play" | "pause" | "stop" | "status" | "shutdown" | "next" | "mode")
@@ -186,7 +195,7 @@ fn main() -> ExitCode {
     let result = match arguments(std::env::args_os().skip(1)) {
         Ok(Action::Help) => {
             println!(
-                "muse {}\n\nUsage: muse [--library <file>] [command | <operation>]\nDefault library: ./library.muse (local NetEase)\n\n{}\n\n--backup <copy>  Save a validated snapshot to a new file\n--restore <copy> Restore a v1/v2/v3 copy to a new library file\n--help, -h       Show help\n--version, -V    Show version\n\nWithout an operation, opens the TUI on the 全部本地 playlist. Enter plays the selected track inside the current playlist.\nr cycles sequential, list loop, and single loop. l opens full-screen lyrics; Esc closes them. While lyrics are scrolled away, l returns to the current line. Esc cancels a chooser.\nSpace pauses/resumes; Left/Right seeks 10s. :import imports local NCM/MP3/FLAC.\n:playlist creates or plays a playlist. :q stops shared playback and exits; :detach keeps playback.\n\nDifferent audio is retained; equal tagged names group candidates for selection. No network API is used.\nVersion-1 and version-2 libraries require library upgrade after closing clients and shutting down the old service.\nUpgrade creates a verified pre-upgrade backup; reimport original files to recover previously skipped audio.",
+                "muse {}\n\nUsage: muse [--library <file>] [command | <operation>]\nDefault library: ./library.muse (local NetEase)\n\n{}\n\n--backup <copy>  Save a validated snapshot to a new file\n--restore <copy> Restore a v1/v2/v3 copy to a new library file\n--help, -h       Show help\n--version, -V    Show version\n\nWithout an operation, opens the TUI on the 全部本地 playlist. Enter plays the selected track inside the current playlist.\nr cycles sequential, list loop, and single loop. l opens full-screen lyrics; Esc closes them. While lyrics are scrolled away, l returns to the current line. Esc cancels a chooser.\nSpace pauses/resumes; Left/Right seeks 10s. :import imports local NCM/MP3/FLAC.\n:playlist creates or plays a playlist. :volume shows or changes application gain (set, inc, dec); it does not change the system volume. :q stops shared playback and exits; :detach keeps playback.\n\nDifferent audio is retained; equal tagged names group candidates for selection. No network API is used.\nVersion-1 and version-2 libraries require library upgrade after closing clients and shutting down the old service.\nUpgrade creates a verified pre-upgrade backup; reimport original files to recover previously skipped audio.",
                 env!("CARGO_PKG_VERSION"),
                 operations::HELP
             );
@@ -219,6 +228,9 @@ fn main() -> ExitCode {
         }
         Ok(Action::Service(path)) => service::run(&path),
         Ok(Action::Control(path, command)) => service::control(&path, command),
+        Ok(Action::Volume(path, args)) => {
+            operations::volume(&path, &args).and_then(operations::CommandOutput::print)
+        }
         Ok(Action::Run(path)) => {
             if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
                 ui::run(path).map_err(|error| error.to_string())

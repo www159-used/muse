@@ -28,6 +28,9 @@ mod service;
 #[allow(dead_code)]
 #[path = "support/service.rs"]
 mod support;
+#[allow(dead_code)]
+#[path = "../src/volume.rs"]
+mod volume;
 
 #[test]
 #[ignore = "child process entry point used by terminal integration tests"]

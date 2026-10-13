@@ -4,7 +4,7 @@ use std::{
     num::{NonZeroU16, NonZeroU32},
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -180,6 +180,8 @@ pub(super) struct PcmSource {
     rate: NonZeroU32,
     frame: Vec<f32>,
     index: usize,
+    /// Application gain (`f32` bits). This is not the operating-system volume.
+    gain: Arc<AtomicU32>,
 }
 
 impl PcmSource {
@@ -189,6 +191,7 @@ impl PcmSource {
         pcm: Consumer<f32>,
         channels: u16,
         rate: u32,
+        gain: Arc<AtomicU32>,
     ) -> Self {
         Self {
             session,
@@ -198,6 +201,7 @@ impl PcmSource {
             rate: NonZeroU32::new(rate).unwrap(),
             frame: vec![0.0; usize::from(channels)],
             index: usize::from(channels),
+            gain,
         }
     }
 }
@@ -220,8 +224,9 @@ impl Iterator for PcmSource {
                     let eof = self.session.eof.load(Ordering::Acquire);
                     if let Ok(chunk) = self.pcm.read_chunk(self.frame.len()) {
                         if self.session.advance_frame() {
+                            let gain = f32::from_bits(self.gain.load(Ordering::Relaxed));
                             for (sample, value) in self.frame.iter_mut().zip(chunk) {
-                                *sample = value;
+                                *sample = value * gain;
                             }
                         }
                     } else if eof && self.session.finish() {

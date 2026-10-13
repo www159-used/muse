@@ -64,6 +64,8 @@ pub(crate) struct View {
     pub playlist_index: Option<u32>,
     pub playlist_len: u32,
     pub mode: RepeatMode,
+    /// Linear UI volume, 0–100. Amplitude uses [`muse_playback::perceptual_gain`].
+    pub volume: u8,
 }
 
 impl Default for View {
@@ -78,6 +80,7 @@ impl Default for View {
             playlist_index: None,
             playlist_len: 0,
             mode: RepeatMode::Sequential,
+            volume: 100,
         }
     }
 }
@@ -95,6 +98,9 @@ pub(crate) enum Action {
     Pause,
     Seek(SeekTarget),
     Stop,
+    SetVolume(u8),
+    IncVolume(u32),
+    DecVolume(u32),
 }
 
 struct PlaylistSession {
@@ -132,7 +138,7 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
-    pub fn start(path: PathBuf) -> Self {
+    pub fn start(path: PathBuf) -> Result<Self, String> {
         Self::start_with(path, || {
             NativePlayback::open_default().map_err(|error| error.to_string())
         })
@@ -141,9 +147,13 @@ impl Worker {
     pub(crate) fn start_with<P: Playback + Send + 'static>(
         path: PathBuf,
         open: impl Fn() -> Result<P, String> + Send + 'static,
-    ) -> Self {
+    ) -> Result<Self, String> {
+        let volume = load_saved_volume(&path)?;
         let (commands, receiver) = mpsc::sync_channel::<Request>(16);
-        let view = Arc::new(Mutex::new(View::default()));
+        let view = Arc::new(Mutex::new(View {
+            volume,
+            ..View::default()
+        }));
         let thread_view = Arc::clone(&view);
         let quit = Arc::new(AtomicBool::new(false));
         let thread_quit = Arc::clone(&quit);
@@ -160,6 +170,7 @@ impl Worker {
             let mut player: Option<P> = None;
             let mut current = None;
             let mut generation = 0_u64;
+            let mut volume = volume;
             let mut session = PlaylistSession {
                 id: None,
                 name: String::new(),
@@ -179,6 +190,7 @@ impl Worker {
                         current: &mut current,
                         generation: &mut generation,
                         quit: &thread_quit,
+                        volume,
                     }
                 };
             }
@@ -239,6 +251,20 @@ impl Worker {
                                 session.mode = mode;
                                 Ok(())
                             }
+                            Action::SetVolume(requested) => commit_volume(
+                                &path,
+                                &mut volume,
+                                player.as_mut(),
+                                requested.min(100),
+                            ),
+                            Action::IncVolume(steps) => {
+                                let next = u32::from(volume).saturating_add(steps).min(100) as u8;
+                                commit_volume(&path, &mut volume, player.as_mut(), next)
+                            }
+                            Action::DecVolume(steps) => {
+                                let next = u32::from(volume).saturating_sub(steps) as u8;
+                                commit_volume(&path, &mut volume, player.as_mut(), next)
+                            }
                             action
                                 if matches!(
                                     action,
@@ -281,7 +307,7 @@ impl Worker {
                             view.pending = None;
                         }
                         view.error = result.as_ref().err().cloned();
-                        update_status(player.as_ref(), &mut view, &mut session);
+                        update_status(player.as_ref(), &mut view, &mut session, volume);
                         if let Some(reply) = request.reply {
                             let _ = reply.send(result.map(|()| view.clone()));
                         }
@@ -289,7 +315,7 @@ impl Worker {
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         let finished = {
                             let mut view = lock(&thread_view);
-                            update_status(player.as_ref(), &mut view, &mut session);
+                            update_status(player.as_ref(), &mut view, &mut session, volume);
                             view.error.is_none()
                                 && view
                                     .status
@@ -307,7 +333,7 @@ impl Worker {
                                 Ok(false) => {}
                                 Err(error) => view.error = Some(error),
                             }
-                            update_status(player.as_ref(), &mut view, &mut session);
+                            update_status(player.as_ref(), &mut view, &mut session, volume);
                         }
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -316,13 +342,13 @@ impl Worker {
             // NativePlayback::drop silences output before joining its decoder worker.
             drop(player);
         });
-        Self {
+        Ok(Self {
             commands,
             view,
             quit,
             alive,
             thread: Some(thread),
-        }
+        })
     }
 
     pub fn view(&self) -> View {
@@ -410,7 +436,46 @@ fn accepts(expected: Option<Current>, current: Option<Current>) -> bool {
     expected == current
 }
 
-fn update_status<P: Playback>(player: Option<&P>, view: &mut View, session: &mut PlaylistSession) {
+fn load_saved_volume(path: &std::path::Path) -> Result<u8, String> {
+    // Missing file means the daemon default (100). Callers that have no live
+    // service must not use this as a substitute for a volume reading.
+    crate::service::Runtime::existing(path)?
+        .ok_or_else(|| "library does not exist".to_string())?
+        .load_volume()
+}
+
+fn save_volume(path: &std::path::Path, volume: u8) -> Result<(), String> {
+    crate::service::Runtime::existing(path)?
+        .ok_or_else(|| "library does not exist".to_string())?
+        .store_volume(volume)
+}
+
+fn commit_volume<P: Playback>(
+    path: &std::path::Path,
+    volume: &mut u8,
+    mut player: Option<&mut P>,
+    next: u8,
+) -> Result<(), String> {
+    if let Some(player) = player.as_mut() {
+        player.set_volume(next).map_err(|error| error.to_string())?;
+    }
+    if let Err(error) = save_volume(path, next) {
+        if let Some(player) = player.as_mut() {
+            let _ = player.set_volume(*volume);
+        }
+        return Err(error);
+    }
+    *volume = next;
+    Ok(())
+}
+
+fn update_status<P: Playback>(
+    player: Option<&P>,
+    view: &mut View,
+    session: &mut PlaylistSession,
+    volume: u8,
+) {
+    view.volume = volume;
     if let Some(player) = player {
         match player.status() {
             Ok(status) => {
@@ -459,6 +524,7 @@ struct PlaybackTask<'a, P, F> {
     current: &'a mut Option<Current>,
     generation: &'a mut u64,
     quit: &'a AtomicBool,
+    volume: u8,
 }
 
 fn load_track<P: Playback, F: Fn() -> Result<P, String>>(
@@ -474,6 +540,11 @@ fn load_track<P: Playback, F: Fn() -> Result<P, String>>(
         .map_err(|error| error.to_string())?;
     if task.player.is_none() {
         *task.player = Some((task.open)()?);
+        task.player
+            .as_mut()
+            .unwrap()
+            .set_volume(task.volume)
+            .map_err(|error| error.to_string())?;
     }
     let player = task.player.as_mut().unwrap();
     player
@@ -555,7 +626,8 @@ mod tests {
         library.import(&song);
         let id = library.list().unwrap()[0].id;
         let worker =
-            Worker::start_with::<NativePlayback>(path, || Err("injected device failure".into()));
+            Worker::start_with::<NativePlayback>(path, || Err("injected device failure".into()))
+                .unwrap();
         worker.load(id).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while worker.view().pending.is_some() {
@@ -601,7 +673,7 @@ mod tests {
         let id = library.list().unwrap()[0].id;
         std::fs::remove_file(&song).unwrap();
         drop(library);
-        let worker = Worker::start(path);
+        let worker = Worker::start(path).unwrap();
         worker.load(id).unwrap();
         wait(&worker, |view| {
             view.pending.is_none() && view.current.is_some()
@@ -662,6 +734,7 @@ mod tests {
         finish: Arc<AtomicBool>,
         loads: Arc<Mutex<Vec<usize>>>,
         plays: Arc<std::sync::atomic::AtomicUsize>,
+        volume: Arc<std::sync::atomic::AtomicU8>,
     }
 
     impl Playback for Scripted {
@@ -708,6 +781,12 @@ mod tests {
 
         fn seek(&mut self, _target: SeekTarget) -> Result<Duration, Self::Error> {
             Ok(Duration::ZERO)
+        }
+
+        fn set_volume(&mut self, volume: u8) -> Result<(), Self::Error> {
+            self.volume
+                .store(volume, std::sync::atomic::Ordering::Release);
+            Ok(())
         }
 
         fn status(&self) -> Result<PlaybackStatus, Self::Error> {
@@ -762,9 +841,14 @@ mod tests {
         let finish = Arc::new(AtomicBool::new(false));
         let loads = Arc::new(Mutex::new(Vec::new()));
         let plays = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let (finish_player, loads_player, plays_player) =
-            (Arc::clone(&finish), Arc::clone(&loads), Arc::clone(&plays));
-        let worker = Worker::start_with(path, move || {
+        let applied = Arc::new(std::sync::atomic::AtomicU8::new(100));
+        let (finish_player, loads_player, plays_player, applied_player) = (
+            Arc::clone(&finish),
+            Arc::clone(&loads),
+            Arc::clone(&plays),
+            Arc::clone(&applied),
+        );
+        let worker = Worker::start_with(path.clone(), move || {
             Ok(Scripted {
                 status: Mutex::new(PlaybackStatus {
                     state: PlaybackState::Empty,
@@ -774,8 +858,10 @@ mod tests {
                 finish: Arc::clone(&finish_player),
                 loads: Arc::clone(&loads_player),
                 plays: Arc::clone(&plays_player),
+                volume: Arc::clone(&applied_player),
             })
-        });
+        })
+        .unwrap();
         let view = worker
             .execute(Action::PlayPlaylist(playlist), None)
             .unwrap();
@@ -823,5 +909,42 @@ mod tests {
         );
         assert_eq!(worker.view().current.unwrap().id, ids[0]);
         assert_eq!(worker.view().mode, RepeatMode::Track);
+        assert_eq!(worker.view().volume, 100);
+        worker.execute(Action::SetVolume(50), None).unwrap();
+        assert_eq!(worker.view().volume, 50);
+        assert_eq!(applied.load(Ordering::Acquire), 50);
+        worker.execute(Action::IncVolume(60), None).unwrap();
+        assert_eq!(worker.view().volume, 100);
+        assert_eq!(applied.load(Ordering::Acquire), 100);
+        worker.execute(Action::DecVolume(1_000), None).unwrap();
+        assert_eq!(worker.view().volume, 0);
+        assert_eq!(applied.load(Ordering::Acquire), 0);
+        let settings = crate::service::Runtime::existing(&path)
+            .unwrap()
+            .unwrap()
+            .settings_path();
+        assert!(
+            std::fs::read_to_string(&settings)
+                .unwrap()
+                .contains("\"volume\":0")
+        );
+        drop(worker);
+        let reloaded = Worker::start_with(path, || {
+            Ok(Scripted {
+                status: Mutex::new(PlaybackStatus {
+                    state: PlaybackState::Empty,
+                    position: Duration::ZERO,
+                    duration: None,
+                }),
+                finish: Arc::new(AtomicBool::new(false)),
+                loads: Arc::new(Mutex::new(Vec::new())),
+                plays: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                volume: Arc::new(std::sync::atomic::AtomicU8::new(100)),
+            })
+        })
+        .unwrap();
+        assert_eq!(reloaded.view().volume, 0);
+        drop(reloaded);
+        std::fs::remove_file(settings).unwrap();
     }
 }
