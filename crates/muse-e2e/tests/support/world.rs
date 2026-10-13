@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use super::playback::Session;
 use muse_library::{ImportReport, Library};
 use std::{
     collections::BTreeMap,
@@ -14,6 +15,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 #[derive(cucumber::World)]
 #[world(init = Self::new)]
 pub struct ImportWorld {
+    playback: Option<Session>,
     // Drop the connection before removing its directory on Windows.
     pub library: Library,
     pub last_report: Option<ImportReport>,
@@ -39,6 +41,7 @@ impl ImportWorld {
         let source = temporary.path().join("sources");
         fs::create_dir(&source)?;
         Ok(Self {
+            playback: None,
             library: Library::open(temporary.path().join("library.muse"))
                 .map_err(std::io::Error::other)?,
             last_report: None,
@@ -138,6 +141,49 @@ impl ImportWorld {
             );
         }
         Ok(())
+    }
+
+    pub fn play_playlist(&mut self, name: &str) -> Result<()> {
+        self.session()?.run(&["playlist", "play", name])
+    }
+
+    pub fn advance(&mut self) -> Result<()> {
+        self.session()?.run(&["next"])
+    }
+
+    pub fn attempt_advance(&mut self) -> Result<()> {
+        self.session()?.attempt(&["next"])
+    }
+
+    pub fn cycle_mode(&mut self) -> Result<()> {
+        self.session()?.run(&["mode"])
+    }
+
+    pub fn expect_advance_failed(&self) -> Result<()> {
+        self.playback
+            .as_ref()
+            .ok_or("playback has not started")?
+            .expect_advance_failed()
+    }
+
+    pub fn status_line(&self, label: &str) -> Result<String> {
+        self.playback
+            .as_ref()
+            .ok_or("playback has not started")?
+            .status_line(label)
+    }
+
+    fn library_path(&self) -> PathBuf {
+        self.legacy_path
+            .clone()
+            .unwrap_or_else(|| self._temporary.path().join("library.muse"))
+    }
+
+    fn session(&mut self) -> Result<&mut Session> {
+        if self.playback.is_none() {
+            self.playback = Some(Session::start(self.library_path(), self._temporary.path())?);
+        }
+        Ok(self.playback.as_mut().unwrap())
     }
 
     pub fn report(&self) -> Result<&ImportReport> {

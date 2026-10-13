@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+#[allow(dead_code, unused_imports)]
+#[path = "../../muse/src/playback.rs"]
+mod playback;
+#[allow(dead_code, unused_imports)]
+#[path = "../../muse/src/service/mod.rs"]
+mod service;
+
 mod steps;
 mod support;
 
@@ -9,6 +16,14 @@ use std::path::Path;
 use support::ImportWorld;
 
 fn main() {
+    if std::env::var_os("MUSE_E2E_CLOCK").is_some() {
+        let path = std::env::var("MUSE_TEST_CHILD_LIBRARY").expect("clock service library path");
+        service::run_with(Path::new(&path), |path| {
+            playback::Worker::start_with(path.to_owned(), || Ok(support::ClockPlayer::default()))
+        })
+        .expect("clock playback service");
+        return;
+    }
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("scenarios");
     let features = block_on(
         cucumber::parser::Basic::default()

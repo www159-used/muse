@@ -27,3 +27,23 @@ fn reopen_library(world: &mut ImportWorld) -> Result<()> {
 fn upgrade_legacy(world: &mut ImportWorld) -> Result<()> {
     world.upgrade_legacy()
 }
+
+#[when(expr = "I play the playlist {string}")]
+fn play_playlist(world: &mut ImportWorld, name: String) -> Result<()> {
+    world.play_playlist(&name)
+}
+
+#[when("I advance to the next track")]
+fn advance(world: &mut ImportWorld) -> Result<()> {
+    world.advance()
+}
+
+#[when("I try to advance past the last track")]
+fn try_advance(world: &mut ImportWorld) -> Result<()> {
+    world.attempt_advance()
+}
+
+#[when("I cycle the playback mode")]
+fn cycle_mode(world: &mut ImportWorld) -> Result<()> {
+    world.cycle_mode()
+}

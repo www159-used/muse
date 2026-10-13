@@ -246,9 +246,7 @@ pub(crate) fn run_with(
                             Err("incompatible or unauthenticated playback request".into())
                         } else if matches!(request.command, Command::Status) {
                             Ok(worker.view())
-                        } else if matches!(request.command, Command::Load(_))
-                            && worker.view().pending.is_some()
-                        {
+                        } else if request.command.loads() && worker.view().pending.is_some() {
                             Err("a track is loading; please wait".into())
                         } else {
                             let _control = controls.lock().unwrap_or_else(|e| e.into_inner());
@@ -305,7 +303,12 @@ pub(crate) fn run_with(
 
 pub(crate) fn control_text(path: &Path, command: Command) -> Result<String, String> {
     let remote = match command {
-        Command::Load(_) => Some(Remote::attach(path)?),
+        Command::Load(_)
+        | Command::PlayPlaylist(_)
+        | Command::UsePlaylist(_)
+        | Command::Next
+        | Command::CycleMode
+        | Command::SetMode(_) => Some(Remote::attach(path)?),
         _ => Remote::find(path)?,
     };
     let Some(remote) = remote else {
@@ -332,10 +335,19 @@ pub(crate) fn control_text(path: &Path, command: Command) -> Result<String, Stri
             .status
             .and_then(|s| s.duration)
             .map_or("unknown".into(), |d| format!("{:.3}s", d.as_secs_f64()));
+        let playlist = if view.playlist_name.is_empty() {
+            "none".to_owned()
+        } else {
+            view.playlist_name
+        };
         output = format!(
-            "Track: {track}\nState: {state}\nPosition: {position:.3}s\nDuration: {duration}"
+            "Track: {track}\nState: {state}\nPosition: {position:.3}s\nDuration: {duration}\nPlaylist: {playlist}\nMode: {}",
+            view.mode.label()
         );
-        if let Some(id) = view.pending {
+        if let Some(index) = view.playlist_index {
+            output.push_str(&format!("\nIndex: {}/{}", index + 1, view.playlist_len));
+        }
+        if let Some(id) = view.pending.filter(|id| *id > 0) {
             output.push_str(&format!("\nLoading: {id}"));
         }
         if let Some(error) = view.error {

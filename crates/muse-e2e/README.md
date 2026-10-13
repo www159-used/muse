@@ -18,6 +18,9 @@ Start with [repeat-import.feature](scenarios/import/repeat-import.feature): impo
 | [Legacy recovery](scenarios/import/legacy-recovery.feature) | Explicit backed-up upgrade preserves the legacy ID; reimport recovers suppressed audio once. |
 | [Local attachments](scenarios/import/local-attachments.feature) | Matching local lyrics and a NetEase `meta/track-321.jpg` cover retain their exact bytes. |
 | [Repeat import](scenarios/import/repeat-import.feature) | The second import adds nothing, skips one duplicate and preserves the owned audio. |
+| [All-local playback](scenarios/playlist/all-local-play.feature) | Playing 全部本地 starts sequential playback of the imported tracks. |
+| [Sequential stop](scenarios/playlist/sequential-stop.feature) | Next walks the playlist and a further next fails on the last track. |
+| [Repeat modes](scenarios/playlist/repeat-modes.feature) | Cycling mode walks sequential, list loop, and single loop. |
 
 Every import checks added/duplicate counts, rejects unexpected failures or issues, verifies library audio against independent fixtures and checks that all prepared source files remain unchanged. Track tables describe the complete library and match each row once without depending on import order.
 
@@ -31,7 +34,7 @@ make e2e E2E_FILTER=FLAC
 cargo test -p muse-e2e --locked --test import -- --name twice
 ```
 
-`make e2e` prints each Given / When / Then step and its result. `make e2e-list` lists stories without creating a library. Filters match scenario names using a regular expression. Workspace tests and CI include all scenarios.
+`make e2e` builds the `muse` CLI, then prints each Given / When / Then step and its result. `make e2e-list` lists stories without creating a library. Filters match scenario names using a regular expression. Workspace tests and CI include all scenarios. Playlist stories drive that CLI against the same clock playback service the service tests use, so they need no audio device.
 
 ## Feature and step definitions
 
@@ -52,6 +55,14 @@ The feature describes user actions and observable outcomes. [Cucumber's step att
 | `And the imported track has artist "Fixture Artist", album "Fixture Album" and NetEase ID 321` | [track_metadata](tests/steps/then.rs) checks explicit metadata values. |
 | `And the imported track has a PNG cover matching "cover.png"` | [track_cover](tests/steps/then.rs) checks one cover, its MIME type and exact fixture bytes. |
 | `And the imported track has these lyrics:` | [track_lyrics](tests/steps/then.rs) checks one lyrics attachment, its MIME type and the literal docstring bytes. |
+| `When I play the playlist "全部本地"` | [play_playlist](tests/steps/when.rs) asks the shared playback service to start that playlist. |
+| `When I advance to the next track` | [advance](tests/steps/when.rs) runs `next` and requires it to succeed. |
+| `When I try to advance past the last track` | [try_advance](tests/steps/when.rs) runs `next` and records whether it failed. |
+| `When I cycle the playback mode` | [cycle_mode](tests/steps/when.rs) cycles sequential, list loop, and single loop. |
+| `Then the current playlist is "全部本地"` | [current_playlist](tests/steps/then.rs) reads the status playlist line. |
+| `Then the playback mode is "sequential"` | [playback_mode](tests/steps/then.rs) reads the status mode label. |
+| `Then the current track index is 1 of 2` | [track_index](tests/steps/then.rs) reads the 1-based status index. |
+| `Then advancing fails` | [advancing_fails](tests/steps/then.rs) checks that the attempted `next` was rejected. |
 
 The [World](tests/support/world.rs) holds one real temporary source directory, a separate SQLite library and the latest import report. Cucumber creates a new World for each scenario and registers the step definitions automatically. [The entry point](tests/import.rs) starts the runner and treats skipped/undefined steps as failures. An empty story directory also fails.
 

@@ -24,8 +24,11 @@ Import progress composes decomposed Korean filenames into complete Hangul syllab
 cargo run -p muse -- --library ./library.muse
 ```
 
-The default library is `./library.muse`, with type `netease` and a filename-derived name that survives renaming. Older version-1 libraries require the explicit upgrade described below. `--help` and `--version` work without an interactive terminal or opening the library.
+The default library is `./library.muse`, with type `netease` and a filename-derived name that survives renaming. Older version-1 and version-2 libraries require the explicit upgrade described below. `--help` and `--version` work without an interactive terminal or opening the library.
 
+- The TUI opens on the **全部本地** playlist, which contains every local track. Playback, advance, and repeat modes apply only to the current playlist. `r` cycles sequential (stop at the end), list loop, and single-track loop. The status line shows the mode.
+- `l` opens full-screen lyrics over the list and keeps the status bar. The current line stays centered and highlighted, without timestamps. `j`/`k` or the wheel scrolls and pauses that follow for about 3 seconds. While follow is paused, `l` snaps back to the current line; while following, `l` closes the lyrics. Esc always closes them. With no stored lyrics the screen shows 暂无歌词. Artwork is not rendered.
+- `:playlist list` shows playlists. `:playlist new <name>` creates one. `:playlist add <playlist>` adds the selected track. `:playlist use <playlist>` shows that playlist, and `:playlist play <playlist>` starts it. `:playlist library` returns to grouped library browsing.
 - Browsing groups show aligned line numbers starting at 1 in library order and candidate counts. Numbers remain absolute when scrolled.
 - `j/k` or Up/Down selects a group. Enter plays a single candidate or opens a chooser for alternatives. In the chooser, `j/k` or arrows move, Enter confirms the exact candidate, and Esc cancels while the current song continues. Numeric counts work with movement: `3j` moves down three rows and `2k` moves up two.
 - Ctrl-d/u moves down/up half the focused panel's visible rows. Ctrl-f/b or PageDown/PageUp moves a page with one row of overlap, following agent board's keyboard rules. Counts multiply the distance: `2` followed by Ctrl-d moves two half pages. Short libraries count only existing rows, and distances adapt to resizing and stop at both ends.
@@ -54,12 +57,18 @@ Playback belongs to a local service, started automatically when opening the TUI.
 muse --library ./library.muse status
 muse --library ./library.muse pause
 muse --library ./library.muse play       # Resume/start the current loaded track
-muse --library ./library.muse play 42    # Load database track ID 42
+muse --library ./library.muse play 42    # Play database track ID 42 inside the current playlist
+muse --library ./library.muse playlist list
+muse --library ./library.muse playlist create "Night Drive"
+muse --library ./library.muse playlist add "Night Drive" 42
+muse --library ./library.muse playlist play "Night Drive"
+muse --library ./library.muse next
+muse --library ./library.muse mode       # Cycle sequential, list, and single
 muse --library ./library.muse stop
 muse --library ./library.muse shutdown   # Stop playback and exit the service
 ```
 
-`play <track-id>` uses a database ID, **not the numbered row in the TUI**. `status` shows the current track ID, state, position, duration and playback errors. Explicit track playback can start a service for an existing library; bare `play` requires a loaded track. Pause and stop are idempotent. With no service, status reports its absence and stop/shutdown do nothing successfully; these commands do not create a library. Commands report success after completion. If a connection is lost before the response, inspect status before repeating the operation.
+`play <track-id>` uses a database ID, **not the numbered row in the TUI**, and plays that track inside the current playlist. The default playlist is 全部本地. `playlist play` switches playlist and starts at its first track. `next` moves to the next playlist track; sequential mode stops at the end, list mode wraps, and single mode repeats the current track when it finishes. `status` shows the current track ID, state, position, duration, playlist, repeat mode, and playback errors. Explicit track playback can start a service for an existing library; bare `play` requires a loaded track. Pause and stop are idempotent. With no service, status reports its absence and stop/shutdown do nothing successfully; these commands do not create a library. Commands report success after completion. If a connection is lost before the response, inspect status before repeating the operation.
 
 One service is shared by this user and the library's canonical path. Relative and symlink aliases reconnect to it; hard-link aliases are not unified. Multiple TUIs share playback, so `:q` in one stops it for all; `:detach` leaves it alone. Selection and search prompts remain local to each TUI. The service stays available after stop or track completion until `shutdown` or OS termination. It does not register for login startup or restore playback after service restart.
 
@@ -67,7 +76,7 @@ An observed terminal hangup stops playback. A forced kill or crash cannot send s
 
 The service listens only on loopback and requires a random credential in a user-private runtime directory: `$HOME/.muse-sessions` on Unix or `%LOCALAPPDATA%\.muse-sessions` on Windows. `MUSE_RUNTIME_DIR` can select an isolated runtime directory; its parent must already exist. Existing directories must have owner-only permissions (0700 on Unix; a protected owner-only DACL on Windows). All clients for a session must use the same runtime directory. No credentials are passed in command arguments.
 
-Playback controls and audio reads run in the background. The current track changes only after successful loading. The status line shows actual state, music position and known duration; natural completion retains the current track and stops. Invalid replacement audio preserves a healthy old source. Runtime input, decoder or device failures remain visible until a successful load or stop rebuilds playback. Browsing, importing and backups remain usable without an audio device.
+Playback controls and audio reads run in the background. The current track changes only after successful loading. The status line shows actual state, music position, known duration, the current playlist, and the repeat mode. When a track finishes, sequential mode plays the next playlist track and stops at the end; list loop wraps; single loop restarts the track. Invalid replacement audio preserves a healthy old source. Runtime input, decoder or device failures remain visible until a successful load or stop rebuilds playback. Browsing, importing and backups remain usable without an audio device.
 
 The built-in `muse-library::netease` extension owns NCM decoding, NetEase tags/IDs, local download selection, attachment association and browsing groups. Storage owns audio blobs, candidates, source observations and transactions. Ordinary MP3/FLAC files remain usable without a NetEase ID. Unknown library types are rejected. Additional source extensions, APIs for lyrics/artwork, and multi-library aggregation are deferred.
 
@@ -75,7 +84,7 @@ Imports preserve source files and work offline. Exact encoded audio bytes share 
 
 Candidates with the same NetEase ID form a platform song. Platform songs whose representative real tagged title and artist match after trimming and Unicode lowercasing share a browsing group. Missing tags never use filename equality for grouping. Groups are presentation only: live recordings and remasters retain separate candidate IDs, audio and attachments. No version is ranked or preferred automatically. A `g:<lowest-candidate-id>` token identifies the current group; deleting its anchor invalidates that token.
 
-Reimports can fill missing primary attachments on the same candidate. Conflicting attachment observations remain recorded, and a name collision never copies artwork or lyrics to another recording. `show` exposes source/container information and attachment attribution, including unknown legacy provenance. Artwork and lyrics are stored but not rendered as media yet.
+Reimports can fill missing primary attachments on the same candidate. Conflicting attachment observations remain recorded, and a name collision never copies artwork or lyrics to another recording. `show` exposes source/container information and attachment attribution, including unknown legacy provenance. Artwork is stored but not rendered. Lyrics from a stored `.lrc` attachment are shown full-screen in the TUI.
 
 Lyrics come from matching local `.lrc` files. Artwork comes from embedded data or `meta/track-ID.jpg` matching a NetEase ID already present in the file. Attachment searches stay within the import scope and do not follow external symlinks.
 
@@ -97,7 +106,7 @@ Command mode supports repeated commands, Up/Down history, editable Unicode input
 
 `play g:42` in command mode lists numbered alternatives; enter a number to confirm or Esc to cancel. A one-shot ambiguous group play exits unsuccessfully with candidate IDs, without changing playback. `play 42` always loads candidate ID 42 directly. TUI row numbers refer to groups and are independent of candidate IDs.
 
-## Upgrading a version-1 library
+## Upgrading an older library
 
 Close all TUI and command-mode clients, and shut down the old playback service **with the old binary before replacing it**. New clients reject incompatible services rather than reusing them.
 
@@ -120,7 +129,7 @@ muse --library ./library.muse --backup ./library-backup.muse
 muse --library ./restored.muse --restore ./library-backup.muse
 ```
 
-For development, replace `muse` with `cargo run -p muse --`. Both operations run without a terminal. Copies include a consistent committed snapshot, including WAL data, complete audio, attachments and deduplication records. Destinations and their SQLite journal files must not exist. Copies are validated and published as portable single files. Missing sources fail without creating empty libraries. Backup/restore validate both version-1 and version-2 layouts without upgrading the source. Explicit version-2 upgrade creates its own verified pre-upgrade backup.
+For development, replace `muse` with `cargo run -p muse --`. Both operations run without a terminal. Copies include a consistent committed snapshot, including WAL data, complete audio, attachments and deduplication records. Destinations and their SQLite journal files must not exist. Copies are validated and published as portable single files. Missing sources fail without creating empty libraries. Backup/restore validate version-1, version-2, and version-3 layouts without upgrading the source. Explicit upgrade creates its own verified pre-upgrade backup: `.pre-v2` when leaving version 1, and `.pre-v3` when leaving version 2. A version-1 upgrade continues through the current playlist schema in the same transaction.
 
 ## Development
 
@@ -160,7 +169,7 @@ MUSE_SAMPLE_ROOT=~/Music/NetEase cargo test -p muse-library --test local_samples
 
 The sample folder must directly contain MP3, FLAC and NCM. CI uses generated repository fixtures rather than personal music.
 
-Import workflows have a separate test-only workspace package. English Gherkin stories cover MP3/FLAC imports, multiple tracks, recursive folders, Unicode paths, mixed downloads, local lyrics/artwork and repeated imports. Given / When / Then step definitions use real isolated source files and SQLite through the public library interface. Cucumber discovers `.feature` files and reports each step. Workspace tests and CI include all scenarios.
+Import and playlist workflows have a separate test-only workspace package. English Gherkin stories cover MP3/FLAC imports, multiple tracks, recursive folders, Unicode paths, mixed downloads, local lyrics/artwork, repeated imports, and phase-1 playlist playback. Given / When / Then step definitions use real isolated source files and SQLite through the public library interface. Playlist stories drive the `muse` CLI against the shared playback service. Cucumber discovers `.feature` files and reports each step. Workspace tests and CI include all scenarios.
 
 ```sh
 make e2e

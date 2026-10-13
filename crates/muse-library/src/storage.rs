@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub(crate) const APPLICATION_ID: i64 = 0x4d55_5345;
-pub(crate) const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
+pub const ALL_LOCAL_PLAYLIST: &str = "全部本地";
 const TRACK_COLUMNS: &str =
     "id, title, artist, album, format, duration_ms, netease_id, content_hash";
 
@@ -27,9 +28,17 @@ pub enum LibraryError {
     #[error("library version {0} is newer than supported version {SCHEMA_VERSION}")]
     NewerSchema(i64),
     #[error(
-        "library version 1 requires an offline upgrade: close clients, then run muse library upgrade"
+        "this library requires an offline upgrade: close clients, then run muse library upgrade"
     )]
     UpgradeRequired,
+    #[error("playlist {0} does not exist")]
+    PlaylistNotFound(i64),
+    #[error("a playlist named {0} already exists")]
+    PlaylistExists(String),
+    #[error("playlist name must not be empty")]
+    EmptyPlaylistName,
+    #[error("the all-local playlist already includes every library track")]
+    AllLocalImmutable,
     #[error("unsupported library type: {0}")]
     UnsupportedType(String),
     #[error("library is in use or undergoing maintenance; close its clients and service first")]
@@ -131,6 +140,21 @@ pub struct SongGroup {
     pub candidates: Vec<Track>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaylistKind {
+    AllLocal,
+    User,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Playlist {
+    pub id: i64,
+    pub name: String,
+    pub kind: PlaylistKind,
+    pub len: i64,
+}
+
 /// A connection to one typed library. Maintenance ownership lasts until drop.
 pub struct Library {
     pub(crate) connection: Connection,
@@ -178,7 +202,7 @@ impl Library {
         if version > SCHEMA_VERSION {
             return Err(LibraryError::NewerSchema(version));
         }
-        if version == 1 {
+        if (1..SCHEMA_VERSION).contains(&version) {
             return Err(LibraryError::UpgradeRequired);
         }
         if version == 0 && !readonly {
@@ -192,6 +216,7 @@ impl Library {
                     "INSERT INTO library_descriptor VALUES(1,?1,'netease')",
                     [crate::upgrade::default_name(path)],
                 )?;
+                tx.execute_batch(include_str!("schema-v3.sql"))?;
             }
             tx.commit()?;
         }
@@ -207,8 +232,15 @@ impl Library {
             library
                 .connection
                 .pragma_update(None, "journal_mode", "WAL")?;
+            library.ensure_all_local()?;
         }
         Ok(library)
+    }
+
+    pub fn schema_version(&self) -> Result<i64, LibraryError> {
+        Ok(self
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))?)
     }
 
     pub fn descriptor(&self) -> Result<LibraryDescriptor, LibraryError> {
@@ -449,6 +481,156 @@ impl Library {
         }
         tx.commit()?;
         Ok((existing.is_none(), collision))
+    }
+
+    fn ensure_all_local(&self) -> Result<(), LibraryError> {
+        self.connection.execute(
+            "INSERT INTO playlists(name, kind) SELECT ?1, 'all_local' WHERE NOT EXISTS (SELECT 1 FROM playlists WHERE kind = 'all_local')",
+            [ALL_LOCAL_PLAYLIST],
+        )?;
+        Ok(())
+    }
+
+    pub fn playlists(&self) -> Result<Vec<Playlist>, LibraryError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, name, kind FROM playlists ORDER BY CASE kind WHEN 'all_local' THEN 0 ELSE 1 END, id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (id, name, kind) = row?;
+            self.playlist_from(id, name, kind)
+        })
+        .collect()
+    }
+
+    pub fn playlist(&self, id: i64) -> Result<Playlist, LibraryError> {
+        let (name, kind): (String, String) = self
+            .connection
+            .query_row(
+                "SELECT name, kind FROM playlists WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or(LibraryError::PlaylistNotFound(id))?;
+        self.playlist_from(id, name, kind)
+    }
+
+    pub fn all_local(&self) -> Result<Playlist, LibraryError> {
+        let id: i64 = self.connection.query_row(
+            "SELECT id FROM playlists WHERE kind = 'all_local'",
+            [],
+            |row| row.get(0),
+        )?;
+        self.playlist(id)
+    }
+
+    pub fn create_playlist(&mut self, name: &str) -> Result<Playlist, LibraryError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(LibraryError::EmptyPlaylistName);
+        }
+        if name == ALL_LOCAL_PLAYLIST
+            || self
+                .connection
+                .query_row("SELECT 1 FROM playlists WHERE name = ?1", [name], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .optional()?
+                .is_some()
+        {
+            return Err(LibraryError::PlaylistExists(name.to_owned()));
+        }
+        self.connection.execute(
+            "INSERT INTO playlists(name, kind) VALUES(?1, 'user')",
+            [name],
+        )?;
+        self.playlist(self.connection.last_insert_rowid())
+    }
+
+    /// Adds a library track to a user playlist. Returns false when it is already a member.
+    pub fn add_to_playlist(
+        &mut self,
+        playlist_id: i64,
+        track_id: i64,
+    ) -> Result<bool, LibraryError> {
+        let playlist = self.playlist(playlist_id)?;
+        if playlist.kind == PlaylistKind::AllLocal {
+            return Err(LibraryError::AllLocalImmutable);
+        }
+        self.track(track_id)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let exists: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM playlist_items WHERE playlist_id = ?1 AND track_id = ?2",
+                params![playlist_id, track_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_some() {
+            return Ok(false);
+        }
+        let position: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_items WHERE playlist_id = ?1",
+            [playlist_id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO playlist_items(playlist_id, position, track_id) VALUES(?1, ?2, ?3)",
+            params![playlist_id, position, track_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn playlist_tracks(&self, playlist_id: i64) -> Result<Vec<Track>, LibraryError> {
+        let playlist = self.playlist(playlist_id)?;
+        if playlist.kind == PlaylistKind::AllLocal {
+            return self.list();
+        }
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks JOIN playlist_items ON tracks.id = playlist_items.track_id WHERE playlist_items.playlist_id = ?1 ORDER BY playlist_items.position"
+        ))?;
+        Ok(statement
+            .query_map([playlist_id], track_from_row)?
+            .collect::<Result<_, _>>()?)
+    }
+
+    fn playlist_from(&self, id: i64, name: String, kind: String) -> Result<Playlist, LibraryError> {
+        let kind = match kind.as_str() {
+            "all_local" => PlaylistKind::AllLocal,
+            "user" => PlaylistKind::User,
+            _ => {
+                return Err(LibraryError::InvalidBackup(format!(
+                    "unknown playlist kind {kind}"
+                )));
+            }
+        };
+        let len = match kind {
+            PlaylistKind::AllLocal => {
+                self.connection
+                    .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?
+            }
+            PlaylistKind::User => self.connection.query_row(
+                "SELECT COUNT(*) FROM playlist_items WHERE playlist_id = ?1",
+                [id],
+                |row| row.get(0),
+            )?,
+        };
+        Ok(Playlist {
+            id,
+            name,
+            kind,
+            len,
+        })
     }
 }
 

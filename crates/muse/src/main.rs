@@ -29,6 +29,15 @@ enum Action {
     },
 }
 
+fn parse_mode(name: &str) -> Result<playback::RepeatMode, String> {
+    match name {
+        "sequential" => Ok(playback::RepeatMode::Sequential),
+        "list" | "loop" => Ok(playback::RepeatMode::List),
+        "single" | "track" => Ok(playback::RepeatMode::Track),
+        _ => Err("mode must be sequential, list, or single".into()),
+    }
+}
+
 fn path_argument(
     arguments: &mut impl Iterator<Item = OsString>,
     option: &str,
@@ -53,7 +62,7 @@ fn arguments(mut arguments: impl Iterator<Item = OsString>) -> Result<Action, St
     if filtered.first().is_some_and(|a| {
         matches!(
             a.to_str(),
-            Some("list" | "show" | "import" | "library" | "command")
+            Some("list" | "show" | "import" | "library" | "command" | "playlist")
         )
     }) || (filtered.first().is_some_and(|a| a == "play")
         && filtered
@@ -87,12 +96,25 @@ fn arguments(mut arguments: impl Iterator<Item = OsString>) -> Result<Action, St
             internal_service = true;
         } else if matches!(
             argument.to_str(),
-            Some("play" | "pause" | "stop" | "status" | "shutdown")
+            Some("play" | "pause" | "stop" | "status" | "shutdown" | "next" | "mode")
         ) {
             if control.is_some() {
                 return Err("specify one playback command".into());
             }
             control = Some(match argument.to_str().unwrap() {
+                "next" => service::Command::Next,
+                "mode" => {
+                    if arguments
+                        .peek()
+                        .is_some_and(|arg| !arg.to_string_lossy().starts_with('-'))
+                    {
+                        service::Command::SetMode(parse_mode(
+                            &arguments.next().unwrap().to_string_lossy(),
+                        )?)
+                    } else {
+                        service::Command::CycleMode
+                    }
+                }
                 "play" => {
                     if arguments
                         .peek()
@@ -164,7 +186,7 @@ fn main() -> ExitCode {
     let result = match arguments(std::env::args_os().skip(1)) {
         Ok(Action::Help) => {
             println!(
-                "muse {}\n\nUsage: muse [--library <file>] [command | <operation>]\nDefault library: ./library.muse (NetEase)\n\n{}\n\n--backup <copy>  Save a validated snapshot to a new file\n--restore <copy> Restore a v1/v2 copy to a new library file\n--help, -h       Show help\n--version, -V    Show version\n\nWithout an operation, opens the TUI. Enter plays one candidate or opens a chooser; Esc cancels.\nSpace pauses/resumes; Left/Right seeks 10s. :import imports local NCM/MP3/FLAC.\n:q stops shared playback and exits; :detach keeps playback. External imports refresh automatically.\n\nDifferent audio is retained; equal tagged names group candidates for selection. No network API is used.\nVersion-1 libraries require library upgrade after closing clients and shutting down the old service.\nUpgrade creates a verified pre-v2 backup; reimport original files to recover previously skipped audio.",
+                "muse {}\n\nUsage: muse [--library <file>] [command | <operation>]\nDefault library: ./library.muse (local NetEase)\n\n{}\n\n--backup <copy>  Save a validated snapshot to a new file\n--restore <copy> Restore a v1/v2/v3 copy to a new library file\n--help, -h       Show help\n--version, -V    Show version\n\nWithout an operation, opens the TUI on the 全部本地 playlist. Enter plays the selected track inside the current playlist.\nr cycles sequential, list loop, and single loop. l opens full-screen lyrics; Esc closes them. While lyrics are scrolled away, l returns to the current line. Esc cancels a chooser.\nSpace pauses/resumes; Left/Right seeks 10s. :import imports local NCM/MP3/FLAC.\n:playlist creates or plays a playlist. :q stops shared playback and exits; :detach keeps playback.\n\nDifferent audio is retained; equal tagged names group candidates for selection. No network API is used.\nVersion-1 and version-2 libraries require library upgrade after closing clients and shutting down the old service.\nUpgrade creates a verified pre-upgrade backup; reimport original files to recover previously skipped audio.",
                 env!("CARGO_PKG_VERSION"),
                 operations::HELP
             );

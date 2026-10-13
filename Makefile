@@ -7,18 +7,20 @@ E2E_FILTER ?=
 LIBRARY ?= ./library.muse
 TARGET ?= $(shell rustc -vV | sed -n 's/^host: //p')
 
-.PHONY: help fmt fmt-check interface-check lint test e2e e2e-list build release ci run clean reset-library package release-tools release-dry-run release-tag
+.PHONY: help fmt fmt-check interface-check lint test e2e e2e-list build release ci run clean reset-library upgrade-library package release-tools release-dry-run release-tag
 
 help:
 	@printf '%s\n' \
+	  'make run                        Run muse' \
+	  'make upgrade-library            Upgrade LIBRARY v1/v2 → v3; close clients / old service first' \
+	  'make reset-library              Delete LIBRARY + journals; exit TUIs / shutdown service first' \
+	  '' \
 	  'make ci                         Check formatting, Clippy, tests and release build' \
 	  'make fmt                        Format Rust sources' \
+	  'make build / make release       Build debug / release binary' \
 	  'make e2e                        Run import stories with Cucumber step definitions' \
 	  'make e2e E2E_FILTER=twice        Filter import stories by scenario name' \
 	  'make e2e-list                   List all import scenarios' \
-	  'make build / make release       Build debug / release binary' \
-	  'make run                        Run muse' \
-	  'make reset-library              Delete LIBRARY and its SQLite journals; exit TUIs and shutdown its service first' \
 	  'make package TAG=v0.1.0         Package a release binary for TARGET' \
 	  'make release-tools              Install the pinned cargo-release version' \
 	  'make release-dry-run LEVEL=patch Preview a version release' \
@@ -41,6 +43,7 @@ test:
 	$(CARGO) test --workspace --locked --doc --all-features
 
 e2e:
+	$(CARGO) build -p muse --locked
 	$(CARGO) test -p muse-e2e --locked --test import $(if $(strip $(E2E_FILTER)),-- --name "$(E2E_FILTER)")
 
 e2e-list:
@@ -62,6 +65,9 @@ clean:
 
 reset-library:
 	rm -f -- "$(LIBRARY)" "$(LIBRARY)-wal" "$(LIBRARY)-shm" "$(LIBRARY)-journal"
+
+upgrade-library:
+	$(CARGO) run -p muse --locked -- --library "$(LIBRARY)" library upgrade
 
 package:
 	$(CARGO) build --locked --release --target "$(TARGET)"

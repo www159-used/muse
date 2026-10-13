@@ -83,14 +83,18 @@ impl Client {
             return Err("terminal client is exiting".into());
         }
         let mut view = lock(&self.view);
-        if let Command::Load(id) = command {
+        let loads = command.loads();
+        if loads {
             if view.pending.is_some() {
                 return Err("a track is loading; please wait".into());
             }
-            view.pending = Some(id);
+            view.pending = Some(match command {
+                Command::Load(id) | Command::PlayPlaylist(id) => id,
+                _ => view.current.map(|current| current.id).unwrap_or(0),
+            });
         }
         if let Err(error) = self.requests.try_send((command, view.current)) {
-            if matches!(command, Command::Load(_)) {
+            if loads {
                 view.pending = None;
             }
             return Err(format!("cannot submit playback operation: {error}"));
@@ -100,6 +104,15 @@ impl Client {
 
     pub fn load(&self, id: i64) -> Result<(), String> {
         self.send(Command::Load(id))
+    }
+    pub fn play_playlist(&self, id: i64) -> Result<(), String> {
+        self.send(Command::PlayPlaylist(id))
+    }
+    pub fn use_playlist(&self, id: i64) -> Result<(), String> {
+        self.send(Command::UsePlaylist(id))
+    }
+    pub fn cycle_mode(&self) -> Result<(), String> {
+        self.send(Command::CycleMode)
     }
     pub fn toggle(&self) -> Result<(), String> {
         self.send(Command::Toggle)

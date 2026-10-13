@@ -1368,10 +1368,16 @@ version = "0.1.0"
 dependencies = [
  "cucumber",
  "futures",
+ "getrandom",
  "muse-library",
+ "muse-playback",
  "rusqlite",
+ "rustix",
+ "serde",
+ "serde_json",
  "sha2",
  "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

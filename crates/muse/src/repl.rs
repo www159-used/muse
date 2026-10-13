@@ -282,22 +282,24 @@ pub fn run(path: &Path) -> Result<(), String> {
         }
     })();
     drop(worker); // Cancel at a file boundary and join before returning.
-    let stopped = if !matches!(outcome, Ok(true)) {
-        service::control_text(path, service::Command::Stop)
-    } else {
+    let detached = matches!(outcome, Ok(true));
+    let stopped = if detached {
         Ok(String::new())
+    } else {
+        service::control_text(path, service::Command::Stop)
     };
     let restored = terminal::disable_raw_mode().map_err(|e| e.to_string());
+    // A hangup can surface as ENXIO from the read loop or from restoring the
+    // terminal. Printing that error on the dead terminal panics the process.
+    if crate::ui::terminal_disconnected().unwrap_or(false) {
+        return stopped.map(|_| ());
+    }
     if let Ok(text) = &stopped {
         let _ = writeln!(io::stdout(), "\n{text}");
     }
     stopped?;
     restored?;
-    if crate::ui::terminal_disconnected().unwrap_or(false) {
-        Ok(())
-    } else {
-        outcome.map(|_| ())
-    }
+    outcome.map(|_| ())
 }
 
 fn print_choices(

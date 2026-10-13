@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use crate::playback::{Action, Current, View};
+use crate::playback::{Action, Current, RepeatMode, View};
 use muse_playback::{PlaybackState, PlaybackStatus, SeekTarget};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 pub const TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_FRAME: usize = 64 * 1024;
 
@@ -17,6 +17,11 @@ const MAX_FRAME: usize = 64 * 1024;
 pub enum Command {
     Status,
     Load(i64),
+    PlayPlaylist(i64),
+    UsePlaylist(i64),
+    Next,
+    CycleMode,
+    SetMode(RepeatMode),
     Play,
     Pause,
     Toggle,
@@ -26,9 +31,18 @@ pub enum Command {
 }
 
 impl Command {
+    pub fn loads(&self) -> bool {
+        matches!(self, Self::Load(_) | Self::PlayPlaylist(_) | Self::Next)
+    }
+
     pub fn action(self) -> Option<Action> {
         Some(match self {
             Self::Load(id) => Action::Load(id),
+            Self::PlayPlaylist(id) => Action::PlayPlaylist(id),
+            Self::UsePlaylist(id) => Action::UsePlaylist(id),
+            Self::Next => Action::Next,
+            Self::CycleMode => Action::CycleMode,
+            Self::SetMode(mode) => Action::SetMode(mode),
             Self::Play => Action::Play,
             Self::Pause => Action::Pause,
             Self::Toggle => Action::Toggle,
@@ -65,6 +79,11 @@ pub struct Snapshot {
     pending: Option<i64>,
     status: Option<Status>,
     error: Option<String>,
+    playlist_id: Option<i64>,
+    playlist_name: String,
+    playlist_index: Option<u32>,
+    playlist_len: u32,
+    mode: RepeatMode,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -89,6 +108,11 @@ impl From<View> for Snapshot {
             current: view.current,
             pending: view.pending,
             error: view.error,
+            playlist_id: view.playlist_id,
+            playlist_name: view.playlist_name,
+            playlist_index: view.playlist_index,
+            playlist_len: view.playlist_len,
+            mode: view.mode,
             status: view.status.map(|s| Status {
                 position: s.position,
                 duration: s.duration,
@@ -110,6 +134,11 @@ impl From<Snapshot> for View {
             current: snapshot.current,
             pending: snapshot.pending,
             error: snapshot.error,
+            playlist_id: snapshot.playlist_id,
+            playlist_name: snapshot.playlist_name,
+            playlist_index: snapshot.playlist_index,
+            playlist_len: snapshot.playlist_len,
+            mode: snapshot.mode,
             status: snapshot.status.map(|s| PlaybackStatus {
                 position: s.position,
                 duration: s.duration,
