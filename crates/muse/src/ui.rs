@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{atomic::Ordering, mpsc::TryRecvError},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -26,7 +26,7 @@ use muse_library::{
 use muse_playback::{PlaybackState, SeekTarget};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Position, Rect},
+    layout::{Alignment, Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::Line,
     widgets::{
@@ -114,7 +114,11 @@ struct App {
     lyrics_open: bool,
     lyrics_track: Option<i64>,
     lyrics_lines: Vec<LyricLine>,
-    lyrics_selection: ListState,
+    lyrics_offset: usize,
+    lyrics_following: bool,
+    lyrics_paused_at: Option<Instant>,
+    lyrics_rows: usize,
+    lyrics_area: Rect,
     navigation_count: Option<usize>,
     pending_g: bool,
     worker: Option<ImportWorker>,
@@ -147,7 +151,7 @@ impl App {
             command: None,
             search_prompt: None,
             search: None,
-            message: "全部本地 is the current playlist. Enter plays inside it; r cycles mode; l toggles lyrics. :import adds music.".into(),
+            message: "全部本地 is the current playlist. Enter plays inside it; r cycles mode; l opens lyrics. :import adds music.".into(),
             details: Vec::new(),
             details_focused: false,
             details_scroll: (0, 0),
@@ -160,7 +164,11 @@ impl App {
             lyrics_open: false,
             lyrics_track: None,
             lyrics_lines: Vec::new(),
-            lyrics_selection: ListState::default(),
+            lyrics_offset: 0,
+            lyrics_following: true,
+            lyrics_paused_at: None,
+            lyrics_rows: 0,
+            lyrics_area: Rect::default(),
             navigation_count: None,
             pending_g: false,
             worker: None,
@@ -192,6 +200,13 @@ impl App {
             MouseEventKind::ScrollDown => 3,
             _ => return,
         };
+        if self.lyrics_open {
+            let pointer = Position::new(mouse.column, mouse.row);
+            if self.lyrics_area.contains(pointer) {
+                self.scroll_lyrics(delta);
+            }
+            return;
+        }
         let pointer = Position::new(mouse.column, mouse.row);
         if self.songs_area.contains(pointer) {
             self.reset_navigation();
@@ -250,6 +265,16 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             let count = self.navigation_count.unwrap_or(1);
             self.reset_navigation();
+            if self.lyrics_open {
+                let rows = isize::try_from(self.lyrics_rows.max(1)).unwrap_or(isize::MAX);
+                let distance = rows.saturating_mul(isize::try_from(count).unwrap_or(isize::MAX));
+                match key.code {
+                    KeyCode::Char('d') | KeyCode::Char('f') => self.scroll_lyrics(distance),
+                    KeyCode::Char('u') | KeyCode::Char('b') => self.scroll_lyrics(-distance),
+                    _ => {}
+                }
+                return;
+            }
             match key.code {
                 KeyCode::Char('d') => self.page(1, true, count),
                 KeyCode::Char('u') => self.page(-1, true, count),
@@ -280,6 +305,9 @@ impl App {
             );
             return;
         }
+        if self.lyrics_open {
+            self.refresh_lyric_follow();
+        }
         let count = self.navigation_count.take();
         let pending_g = std::mem::take(&mut self.pending_g);
         let distance = isize::try_from(count.unwrap_or(1).max(1)).unwrap_or(isize::MAX);
@@ -293,6 +321,17 @@ impl App {
             key.code
         };
         match code {
+            KeyCode::Esc if self.lyrics_open => self.close_lyrics(),
+            KeyCode::Char('l') if self.lyrics_open => self.snap_or_close_lyrics(),
+            KeyCode::Char('j') | KeyCode::Down if self.lyrics_open => self.scroll_lyrics(distance),
+            KeyCode::Char('k') | KeyCode::Up if self.lyrics_open => self.scroll_lyrics(-distance),
+            KeyCode::PageDown if self.lyrics_open => {
+                self.scroll_lyrics(self.lyric_page(count.unwrap_or(1)));
+            }
+            KeyCode::PageUp if self.lyrics_open => {
+                self.scroll_lyrics(-self.lyric_page(count.unwrap_or(1)));
+            }
+            KeyCode::Char('g') | KeyCode::Char('G') if self.lyrics_open => {}
             KeyCode::Char('g') => {
                 if pending_g {
                     if let Some(line) = count {
@@ -339,16 +378,7 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(distance),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-distance),
-            KeyCode::Char('l') => {
-                self.lyrics_open = !self.lyrics_open;
-                self.lyrics_track = Some(-1);
-                self.lyrics_lines.clear();
-                self.message = if self.lyrics_open {
-                    "Lyrics panel shown".into()
-                } else {
-                    "Lyrics panel hidden".into()
-                };
-            }
+            KeyCode::Char('l') => self.open_lyrics(),
             KeyCode::Char('r') => self.cycle_repeat(),
             KeyCode::Enter => self.play_selected(),
             KeyCode::Char(' ') => {
@@ -1166,6 +1196,7 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
+        self.refresh_lyric_follow();
         let import = self
             .worker
             .as_ref()
@@ -1181,125 +1212,125 @@ impl App {
             Browser::Library => "Library".to_owned(),
             Browser::Playlist { name, .. } => name.clone(),
         };
-        frame.render_widget(
-            Paragraph::new(format!(
-                "muse | {} [local·NetEase] | {} | {} tracks",
-                self.library_name,
-                list_name,
-                self.tracks.len()
-            ))
-            .style(Style::default().fg(Color::Cyan)),
-            title,
-        );
-        let (main, lyrics_area) = if self.lyrics_open {
-            let [left, right] =
-                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .areas(body);
-            (left, Some(right))
+        if self.lyrics_open {
+            self.draw_lyrics_top(frame, title);
+            self.lyrics_area = body;
+            self.songs_area = Rect::default();
+            self.draw_lyrics(frame, body);
         } else {
-            (body, None)
-        };
-        let [songs, results] =
-            Layout::vertical([Constraint::Percentage(65), Constraint::Percentage(35)]).areas(main);
-        let library_title = self.active_search().map_or_else(
-            || list_name.clone(),
-            |search| format!("{list_name} | {}", search.label(self.selection.selected())),
-        );
-        let songs_block = Block::default()
-            .borders(Borders::ALL)
-            .title(library_title)
-            .border_style(Style::default().fg(if self.details_focused {
-                Color::DarkGray
-            } else {
-                Color::Cyan
-            }));
-        self.songs_area = songs_block.inner(songs);
-        self.results_area = Block::bordered().inner(results);
-        self.reveal_selection();
-        self.scroll_details(0);
-        if self.tracks.is_empty() {
             frame.render_widget(
+                Paragraph::new(format!(
+                    "muse | {} [local·NetEase] | {} | {} tracks",
+                    self.library_name,
+                    list_name,
+                    self.tracks.len()
+                ))
+                .style(Style::default().fg(Color::Cyan)),
+                title,
+            );
+            let main = body;
+            let [songs, results] =
+                Layout::vertical([Constraint::Percentage(65), Constraint::Percentage(35)])
+                    .areas(main);
+            let library_title = self.active_search().map_or_else(
+                || list_name.clone(),
+                |search| format!("{list_name} | {}", search.label(self.selection.selected())),
+            );
+            let songs_block = Block::default()
+                .borders(Borders::ALL)
+                .title(library_title)
+                .border_style(Style::default().fg(if self.details_focused {
+                    Color::DarkGray
+                } else {
+                    Color::Cyan
+                }));
+            self.songs_area = songs_block.inner(songs);
+            self.results_area = Block::bordered().inner(results);
+            self.reveal_selection();
+            self.scroll_details(0);
+            if self.tracks.is_empty() {
+                frame.render_widget(
                 Paragraph::new(
                     "The library is empty\nUse :import <MP3, FLAC or NCM file or folder path> to import music",
                 )
                 .block(songs_block),
                 songs,
             );
-        } else {
-            let number_width = self.tracks.len().to_string().len();
-            let items: Vec<ListItem> = self
-                .tracks
-                .iter()
-                .enumerate()
-                .map(|(index, track)| {
-                    ListItem::new(Line::from(format!(
-                        "{:>number_width$} {}{} — {} [{}]",
-                        index + 1,
-                        if self
-                            .playback_view
-                            .current
-                            .is_some_and(|current| current.id == track.id
-                                || self.groups.iter().any(|g| g.candidates[0].id == track.id
-                                    && g.candidates.iter().any(|t| t.id == current.id)))
-                        {
-                            "♪ "
-                        } else {
-                            ""
-                        },
-                        track.title,
-                        track.artist.as_deref().unwrap_or("Unknown"),
-                        self.groups
-                            .iter()
-                            .find(|g| g.candidates[0].id == track.id)
-                            .map_or_else(
-                                || track.format.clone(),
-                                |g| format!("{}; {} candidates", track.format, g.candidates.len())
+            } else {
+                let number_width = self.tracks.len().to_string().len();
+                let items: Vec<ListItem> =
+                    self.tracks
+                        .iter()
+                        .enumerate()
+                        .map(|(index, track)| {
+                            ListItem::new(Line::from(format!(
+                                "{:>number_width$} {}{} — {} [{}]",
+                                index + 1,
+                                if self.playback_view.current.is_some_and(|current| current.id
+                                    == track.id
+                                    || self.groups.iter().any(|g| g.candidates[0].id == track.id
+                                        && g.candidates.iter().any(|t| t.id == current.id)))
+                                {
+                                    "♪ "
+                                } else {
+                                    ""
+                                },
+                                track.title,
+                                track.artist.as_deref().unwrap_or("Unknown"),
+                                self.groups
+                                    .iter()
+                                    .find(|g| g.candidates[0].id == track.id)
+                                    .map_or_else(
+                                        || track.format.clone(),
+                                        |g| format!(
+                                            "{}; {} candidates",
+                                            track.format,
+                                            g.candidates.len()
+                                        )
+                                    )
+                            )))
+                            .style(
+                                if self
+                                    .active_search()
+                                    .is_some_and(|search| search.contains(index))
+                                {
+                                    Style::default()
+                                        .fg(Color::Yellow)
+                                        .add_modifier(Modifier::BOLD)
+                                } else {
+                                    Style::default()
+                                },
                             )
-                    )))
-                    .style(
-                        if self
-                            .active_search()
-                            .is_some_and(|search| search.contains(index))
-                        {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default()
-                        },
-                    )
-                })
-                .collect();
-            frame.render_stateful_widget(
-                List::new(items)
-                    .block(songs_block)
-                    .highlight_style(Style::default().bg(Color::Blue).fg(Color::White))
-                    .highlight_symbol("› ")
-                    .highlight_spacing(HighlightSpacing::Always),
-                songs,
-                &mut self.selection,
-            );
-        }
-        if let Some((source, progress)) = &import {
-            self.draw_import(frame, results, source, progress.as_ref());
-        } else {
-            let results_block = Block::default()
-                .borders(Borders::ALL)
-                .title("Import results | Tab focus, j/k scroll, h/l horizontal")
-                .border_style(Style::default().fg(if self.details_focused {
-                    Color::Cyan
-                } else {
-                    Color::DarkGray
-                }));
-            frame.render_widget(
-                Paragraph::new(self.details.join("\n"))
-                    .block(results_block)
-                    .scroll(self.details_scroll),
-                results,
-            );
-        }
-        if let Some(area) = lyrics_area {
-            self.draw_lyrics(frame, area);
+                        })
+                        .collect();
+                frame.render_stateful_widget(
+                    List::new(items)
+                        .block(songs_block)
+                        .highlight_style(Style::default().bg(Color::Blue).fg(Color::White))
+                        .highlight_symbol("› ")
+                        .highlight_spacing(HighlightSpacing::Always),
+                    songs,
+                    &mut self.selection,
+                );
+            }
+            if let Some((source, progress)) = &import {
+                self.draw_import(frame, results, source, progress.as_ref());
+            } else {
+                let results_block = Block::default()
+                    .borders(Borders::ALL)
+                    .title("Import results | Tab focus, j/k scroll, h/l horizontal")
+                    .border_style(Style::default().fg(if self.details_focused {
+                        Color::Cyan
+                    } else {
+                        Color::DarkGray
+                    }));
+                frame.render_widget(
+                    Paragraph::new(self.details.join("\n"))
+                        .block(results_block)
+                        .scroll(self.details_scroll),
+                    results,
+                );
+            }
         }
         let playback_status = self.playback_line();
         let status_text = match &import {
@@ -1532,47 +1563,106 @@ impl App {
         format!("{state} {title} {position}/{total} | {playlist} | {mode}")
     }
 
+    fn draw_lyrics_top(&self, frame: &mut Frame, area: Rect) {
+        let (title, artist) = self.current_track().map_or(("", "Unknown"), |track| {
+            (
+                track.title.as_str(),
+                track.artist.as_deref().unwrap_or("Unknown"),
+            )
+        });
+        let (elapsed, total) = self.playback_view.status.map_or_else(
+            || ("0:00".to_owned(), "--:--".to_owned()),
+            |status| {
+                (
+                    time_label(status.position),
+                    status
+                        .duration
+                        .map(time_label)
+                        .unwrap_or_else(|| "--:--".into()),
+                )
+            },
+        );
+        let timing = format!("{elapsed} / {total}");
+        let name = if title.is_empty() {
+            "Not playing".to_owned()
+        } else {
+            format!("{title} - {artist}")
+        };
+        let timing_width = u16::try_from(timing.len()).unwrap_or(u16::MAX);
+        let [left, right] = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(timing_width.saturating_add(1)),
+        ])
+        .areas(area);
+        frame.render_widget(
+            Paragraph::new(name).style(Style::default().fg(Color::Cyan)),
+            left,
+        );
+        frame.render_widget(
+            Paragraph::new(timing)
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(Color::Cyan)),
+            right,
+        );
+    }
+
     fn draw_lyrics(&mut self, frame: &mut Frame, area: Rect) {
         self.sync_lyrics();
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title("Lyrics | l hides")
-            .border_style(Style::default().fg(Color::Magenta));
-        let inner = block.inner(area);
-        if self.playback_view.current.is_none() {
-            frame.render_widget(Paragraph::new("Nothing is playing").block(block), area);
+        self.lyrics_rows = usize::from(area.height);
+        if self.playback_view.current.is_none() || self.lyrics_lines.is_empty() {
+            self.draw_lyrics_empty(frame, area);
             return;
         }
-        if self.lyrics_lines.is_empty() {
-            frame.render_widget(
-                Paragraph::new("No lyrics stored for this track").block(block),
-                area,
-            );
-            return;
+        let height = self.lyrics_rows.max(1);
+        let len = self.lyrics_lines.len();
+        if self.lyrics_following {
+            if let Some(active) = self.active_lyric() {
+                self.lyrics_offset = centered_lyric_offset(active, height, len);
+            }
+        } else {
+            self.lyrics_offset = self.lyrics_offset.min(len.saturating_sub(height));
         }
-        self.reveal_lyric(inner.height);
-        let items: Vec<ListItem> = self
+        let active = self.active_lyric();
+        let lines: Vec<Line> = self
             .lyrics_lines
             .iter()
-            .map(|line| {
-                let label = match line.at {
-                    Some(at) => format!("[{}] {}", time_label(at), line.text),
-                    None => line.text.clone(),
+            .enumerate()
+            .skip(self.lyrics_offset)
+            .take(height)
+            .map(|(index, line)| {
+                let style = if Some(index) == active {
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                } else {
+                    Style::default().fg(Color::DarkGray)
                 };
-                ListItem::new(label)
+                Line::from(line.text.as_str()).style(style)
             })
             .collect();
-        frame.render_stateful_widget(
-            List::new(items)
-                .block(block)
-                .highlight_style(
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .highlight_symbol("› "),
-            area,
-            &mut self.lyrics_selection,
+        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
+    }
+
+    fn draw_lyrics_empty(&self, frame: &mut Frame, area: Rect) {
+        let pad = area.height.saturating_sub(2) / 2;
+        let [_, title, helper, _] = Layout::vertical([
+            Constraint::Length(pad),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .areas(area);
+        frame.render_widget(
+            Paragraph::new("暂无歌词")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::White)),
+            title,
+        );
+        frame.render_widget(
+            Paragraph::new("可放同名 .lrc 后 :import")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::DarkGray)),
+            helper,
         );
     }
 
@@ -1591,22 +1681,87 @@ impl App {
             })
             .map(|attachment| parse_lrc(&String::from_utf8_lossy(&attachment.data)))
             .unwrap_or_default();
-        self.lyrics_selection.select(None);
-        *self.lyrics_selection.offset_mut() = 0;
+        self.lyrics_offset = 0;
+        self.lyrics_following = true;
+        self.lyrics_paused_at = None;
     }
 
-    fn reveal_lyric(&mut self, height: u16) {
-        let selected = self.active_lyric();
-        self.lyrics_selection.select(selected);
-        let Some(selected) = selected else {
+    fn open_lyrics(&mut self) {
+        self.lyrics_open = true;
+        self.lyrics_following = true;
+        self.lyrics_paused_at = None;
+        self.lyrics_track = Some(-1);
+        self.message = "Lyrics".into();
+    }
+
+    fn close_lyrics(&mut self) {
+        self.lyrics_open = false;
+        self.lyrics_following = true;
+        self.lyrics_paused_at = None;
+        self.message = "Lyrics hidden".into();
+    }
+
+    fn snap_or_close_lyrics(&mut self) {
+        if self.lyrics_following {
+            self.close_lyrics();
+        } else {
+            self.lyrics_following = true;
+            self.lyrics_paused_at = None;
+            self.message = "Lyrics".into();
+        }
+    }
+
+    fn lyric_page(&self, count: usize) -> isize {
+        let rows = isize::try_from(self.lyrics_rows.max(1)).unwrap_or(isize::MAX);
+        rows.saturating_mul(isize::try_from(count.max(1)).unwrap_or(isize::MAX))
+    }
+
+    fn scroll_lyrics(&mut self, delta: isize) {
+        if self.lyrics_lines.is_empty() || delta == 0 {
+            return;
+        }
+        self.pause_lyric_follow();
+        let height = self.lyrics_rows.max(1);
+        let max = self.lyrics_lines.len().saturating_sub(height);
+        if delta < 0 {
+            self.lyrics_offset = self.lyrics_offset.saturating_sub(delta.unsigned_abs());
+        } else {
+            self.lyrics_offset = self
+                .lyrics_offset
+                .saturating_add(usize::try_from(delta).unwrap_or(usize::MAX));
+        }
+        self.lyrics_offset = self.lyrics_offset.min(max);
+    }
+
+    fn pause_lyric_follow(&mut self) {
+        if self.lyrics_following {
+            let height = self.lyrics_rows.max(1);
+            if let Some(active) = self.active_lyric() {
+                self.lyrics_offset = centered_lyric_offset(active, height, self.lyrics_lines.len());
+            }
+        }
+        self.lyrics_following = false;
+        self.lyrics_paused_at = Some(Instant::now());
+    }
+
+    fn refresh_lyric_follow(&mut self) {
+        let Some(paused) = self.lyrics_paused_at else {
             return;
         };
-        let height = usize::from(height.max(1));
-        let len = self.lyrics_lines.len();
-        let lower = selected.saturating_add(1).saturating_sub(height);
-        let upper = selected.min(len.saturating_sub(height));
-        let offset = self.lyrics_selection.offset_mut();
-        *offset = (*offset).clamp(lower, upper);
+        if paused.elapsed() >= Duration::from_secs(3) {
+            self.lyrics_following = true;
+            self.lyrics_paused_at = None;
+        }
+    }
+
+    fn current_track(&self) -> Option<&Track> {
+        self.playback_view.current.and_then(|current| {
+            self.groups
+                .iter()
+                .flat_map(|group| group.candidates.iter())
+                .chain(self.tracks.iter())
+                .find(|track| track.id == current.id)
+        })
     }
 
     fn active_lyric(&self) -> Option<usize> {
@@ -1618,6 +1773,13 @@ impl App {
             .map(|(index, _)| index)
             .next_back()
     }
+}
+
+fn centered_lyric_offset(selected: usize, height: usize, len: usize) -> usize {
+    let height = height.max(1);
+    selected
+        .saturating_sub(height / 2)
+        .min(len.saturating_sub(height))
 }
 
 fn split_playlist_target(argument: &str) -> (&str, Option<&str>) {
@@ -3405,18 +3567,72 @@ mod tests {
         });
         app.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
         let shown = screen(&mut app, 100, 24);
-        assert!(shown.contains("Lyrics"));
         assert!(shown.contains("Second line"));
-        assert!(shown.contains("›"));
+        assert!(!shown.contains("[00:"));
+        assert!(!shown.contains("Import results"));
+        assert!(app.lyrics_following);
         app.playback_view.status.as_mut().unwrap().position = Duration::from_secs(1);
         let earlier = screen(&mut app, 100, 24);
         assert!(earlier.contains("First line"));
-        assert!(earlier.contains("› [00:00] First line") || earlier.contains("First line"));
+        assert!(!earlier.contains("[00:00]"));
+        app.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert!(!app.lyrics_open);
         app.playback_view.current = None;
         app.lyrics_track = Some(-1);
         app.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        let empty = screen(&mut app, 100, 24);
+        assert!(empty.contains("暂无歌词"));
+        assert!(empty.contains("可放同名 .lrc 后 :import"));
+        assert!(!app.message.to_lowercase().contains("error"));
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.lyrics_open);
+    }
+
+    #[test]
+    fn lyric_scroll_pauses_follow_until_l_or_three_seconds() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = App::new(temporary.path().join("library.muse")).unwrap();
+        let source = temporary.path().join("song.mp3");
+        std::fs::write(
+            &source,
+            include_bytes!("../../muse-library/tests/fixtures/silence.mp3"),
+        )
+        .unwrap();
+        let lyrics: String = (0..40)
+            .map(|second| format!("[00:{second:02}.00]Line {second}\n"))
+            .collect();
+        std::fs::write(source.with_extension("lrc"), lyrics).unwrap();
+        assert_eq!(app.library.import(&source).imported, 1);
+        app.reload_browser().unwrap();
+        let id = app.tracks[0].id;
+        app.playback_view.current = Some(crate::playback::Current { id, generation: 1 });
+        app.playback_view.status = Some(muse_playback::PlaybackStatus {
+            state: PlaybackState::Playing,
+            position: Duration::from_secs(20),
+            duration: Some(Duration::from_secs(60)),
+        });
         app.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
-        assert!(screen(&mut app, 100, 24).contains("Nothing is playing"));
+        let shown = screen(&mut app, 80, 24);
+        assert!(shown.lines().next().unwrap().contains("0:20 / 1:00"));
+        let centered = lyric_row(&shown, "Line 20");
+        app.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(!app.lyrics_following);
+        assert_ne!(lyric_row(&screen(&mut app, 80, 24), "Line 20"), centered);
+        app.lyrics_paused_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(3))
+                .expect("monotonic clock"),
+        );
+        let resumed = screen(&mut app, 80, 24);
+        assert!(app.lyrics_following);
+        assert_eq!(lyric_row(&resumed, "Line 20"), centered);
+        app.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert!(app.lyrics_open);
+        assert!(app.lyrics_following);
+        assert_eq!(lyric_row(&screen(&mut app, 80, 24), "Line 20"), centered);
+        app.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert!(!app.lyrics_open);
     }
 
     #[test]
@@ -3453,6 +3669,13 @@ mod tests {
         assert!(screen(&mut app, 120, 24).contains("Night Drive"));
         app.execute_command("playlist library");
         assert!(screen(&mut app, 120, 24).contains("Library"));
+    }
+
+    fn lyric_row(screen: &str, text: &str) -> usize {
+        screen
+            .lines()
+            .position(|line| line.contains(text))
+            .unwrap_or_else(|| panic!("missing lyric {text}"))
     }
 
     #[test]
