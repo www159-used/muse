@@ -21,6 +21,7 @@ Start with [repeat-import.feature](scenarios/import/repeat-import.feature): impo
 | [All-local playback](scenarios/playlist/all-local-play.feature) | Playing 全部本地 starts sequential playback of the imported tracks. |
 | [Sequential stop](scenarios/playlist/sequential-stop.feature) | Next walks the playlist and a further next fails on the last track. |
 | [Repeat modes](scenarios/playlist/repeat-modes.feature) | Cycling mode walks sequential, list loop, and single loop. |
+| [Application volume](scenarios/playlist/volume.feature) | `volume set`, `inc`, and `dec` change internal gain, clamp, persist across a service restart, and fail when the service is down. |
 
 Every import checks added/duplicate counts, rejects unexpected failures or issues, verifies library audio against independent fixtures and checks that all prepared source files remain unchanged. Track tables describe the complete library and match each row once without depending on import order.
 

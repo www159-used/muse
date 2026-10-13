@@ -47,3 +47,28 @@ fn try_advance(world: &mut ImportWorld) -> Result<()> {
 fn cycle_mode(world: &mut ImportWorld) -> Result<()> {
     world.cycle_mode()
 }
+
+#[when(expr = "I set the playback volume to {int}")]
+fn set_volume(world: &mut ImportWorld, volume: usize) -> Result<()> {
+    world.volume(&["volume", "set", &volume.to_string()])
+}
+
+#[when(expr = "I increase the playback volume by {int}")]
+fn increase_volume(world: &mut ImportWorld, steps: usize) -> Result<()> {
+    world.volume(&["volume", "inc", &steps.to_string()])
+}
+
+#[when(expr = "I decrease the playback volume by {int}")]
+fn decrease_volume(world: &mut ImportWorld, steps: usize) -> Result<()> {
+    world.volume(&["volume", "dec", &steps.to_string()])
+}
+
+#[when("I restart the playback service")]
+fn restart_playback(world: &mut ImportWorld) -> Result<()> {
+    world.restart_playback()
+}
+
+#[when("I shut down the playback service")]
+fn shutdown_playback(world: &mut ImportWorld) -> Result<()> {
+    world.shutdown_playback()
+}

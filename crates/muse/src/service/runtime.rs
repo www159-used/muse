@@ -9,6 +9,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Serialize, Deserialize)]
+struct VolumeFile {
+    volume: u8,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Endpoint {
     pub version: u32,
@@ -53,6 +58,54 @@ impl Runtime {
 
     pub fn endpoint_path(&self) -> PathBuf {
         self.root.join(format!("{}.json", self.identity))
+    }
+
+    pub fn settings_path(&self) -> PathBuf {
+        self.root.join(format!("{}.settings.json", self.identity))
+    }
+
+    /// Loads the persisted UI volume. A missing file is the daemon default of
+    /// 100. This is not a reading of a live service.
+    pub fn load_volume(&self) -> Result<u8, String> {
+        match fs::read(self.settings_path()) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(100),
+            Err(error) => Err(format!("cannot read volume settings: {error}")),
+            Ok(bytes) => {
+                if bytes.len() > 4096 {
+                    return Err("volume settings file is too large".into());
+                }
+                let stored: VolumeFile = serde_json::from_slice(&bytes)
+                    .map_err(|error| format!("cannot read volume settings: {error}"))?;
+                if stored.volume > 100 {
+                    return Err(format!(
+                        "stored volume {} is out of range; expected an integer from 0 to 100",
+                        stored.volume
+                    ));
+                }
+                Ok(stored.volume)
+            }
+        }
+    }
+
+    pub fn store_volume(&self, volume: u8) -> Result<(), String> {
+        if volume > 100 {
+            return Err(format!(
+                "volume {volume} is out of range; use an integer from 0 to 100"
+            ));
+        }
+        self.prepare()?;
+        let mut file = tempfile::NamedTempFile::new_in(&self.root).map_err(|e| e.to_string())?;
+        serde_json::to_writer(&mut file, &VolumeFile { volume }).map_err(|e| e.to_string())?;
+        file.as_file().sync_all().map_err(|e| e.to_string())?;
+        let path = self.settings_path();
+        file.persist(&path).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
     fn lock_path(&self) -> PathBuf {
         self.root.join(format!("{}.lock", self.identity))

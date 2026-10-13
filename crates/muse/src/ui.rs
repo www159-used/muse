@@ -877,6 +877,10 @@ impl App {
                 self.playlist_command(rest);
                 return;
             }
+            Some((BuiltinCommand::Volume, rest)) => {
+                self.volume_command(rest);
+                return;
+            }
             None => {
                 self.message = format!("Unknown command: {input}");
                 return;
@@ -1003,6 +1007,26 @@ impl App {
             self.playback_view.mode = self.playback_view.mode.cycle();
             self.message = format!("Playback mode: {}", self.playback_view.mode.label());
         }
+    }
+
+    fn volume_command(&mut self, rest: &str) {
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        let command = match crate::volume::parse(&tokens) {
+            Ok(command) => command,
+            Err(error) => {
+                self.message = error;
+                return;
+            }
+        };
+        let args: Vec<std::ffi::OsString> = tokens.iter().copied().map(Into::into).collect();
+        let (percent, message) = tui_volume_outcome(
+            command,
+            crate::operations::volume(&self.library_path, &args),
+        );
+        if let Some(percent) = percent {
+            self.playback_view.volume = percent;
+        }
+        self.message = message;
     }
 
     fn playlist_command(&mut self, rest: &str) {
@@ -1518,6 +1542,7 @@ impl App {
     }
 
     fn playback_line(&self) -> String {
+        let volume = format!("vol: {}%", self.playback_view.volume);
         let playlist = if self.playback_view.playlist_name.is_empty() {
             match &self.browser {
                 Browser::Playlist { name, .. } => name.clone(),
@@ -1528,13 +1553,13 @@ impl App {
         };
         let mode = self.playback_view.mode.label();
         if let Some(error) = &self.playback_view.error {
-            return format!("Playback error: {error} | {playlist} | {mode}");
+            return format!("Playback error: {error} | {playlist} | {mode} | {volume}");
         }
         if self.playback_view.pending.is_some() {
-            return format!("Loading track... | {playlist} | {mode}");
+            return format!("Loading track... | {playlist} | {mode} | {volume}");
         }
         let Some(status) = self.playback_view.status else {
-            return format!("Not playing | {playlist} | {mode}");
+            return format!("Not playing | {playlist} | {mode} | {volume}");
         };
         let state = match status.state {
             PlaybackState::Empty => "Empty",
@@ -1560,7 +1585,7 @@ impl App {
             })
             .map(|track| track.title.as_str())
             .unwrap_or("");
-        format!("{state} {title} {position}/{total} | {playlist} | {mode}")
+        format!("{state} {title} {position}/{total} | {playlist} | {mode} | {volume}")
     }
 
     fn draw_lyrics_top(&self, frame: &mut Frame, area: Rect) {
@@ -1772,6 +1797,39 @@ impl App {
             .filter(|(_, line)| line.at.is_some_and(|at| at <= position))
             .map(|(index, _)| index)
             .next_back()
+    }
+}
+
+/// TUI success flash. The status bar already shows `vol: N%`, so the message
+/// line must not repeat the CLI `Volume:` / `Gain:` observation.
+fn volume_success_flash(command: crate::volume::VolumeCommand) -> String {
+    match command {
+        crate::volume::VolumeCommand::Query => "ok".into(),
+        crate::volume::VolumeCommand::Set(value) => format!("vol set {value}"),
+        crate::volume::VolumeCommand::Inc(step) => format!("vol inc {step}"),
+        crate::volume::VolumeCommand::Dec(step) => format!("vol dec {step}"),
+    }
+}
+
+fn ui_volume_percent(observation: &str) -> Option<u8> {
+    observation
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("Volume: "))
+        .and_then(|line| line.strip_suffix('%'))
+        .and_then(|line| line.parse().ok())
+}
+
+fn tui_volume_outcome(
+    command: crate::volume::VolumeCommand,
+    result: Result<crate::operations::CommandOutput, String>,
+) -> (Option<u8>, String) {
+    match result {
+        Ok(output) => (
+            ui_volume_percent(&output.text),
+            volume_success_flash(command),
+        ),
+        Err(error) => (None, error),
     }
 }
 
@@ -3084,10 +3142,10 @@ mod tests {
         assert!(!rendered.contains("Paths"));
         assert!(rendered.lines().last().unwrap().starts_with(" COMMAND "));
         for command in ["import", "q", "quit", "stop", "detach", "playlist"] {
-            assert!(rendered.contains(command));
+            assert!(rendered.contains(command), "{rendered}");
         }
         app.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert_eq!(app.command.as_ref().unwrap().text(), "playlist");
+        assert_eq!(app.command.as_ref().unwrap().text(), "volume");
         app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.command.as_ref().unwrap().text(), "import");
         for (width, height) in [(16, 4), (1, 1)] {
@@ -3190,7 +3248,70 @@ mod tests {
         assert!(text.contains(":import"));
         assert!(text.contains("MP3, FLAC or NCM file or folder"));
         assert!(text.contains("Not playing"));
+        assert!(text.contains("vol: 100%"));
+        assert!(!text.contains("Gain:"));
         assert!(!text.contains("Playing"));
+    }
+
+    #[test]
+    fn tui_volume_success_flash_keeps_volume_on_the_status_bar() {
+        use crate::volume::{VolumeCommand, format_observation};
+
+        let observation = format_observation(50);
+        assert_eq!(observation, "Volume: 50%\nGain: 0.2500");
+        for (command, flash) in [
+            (VolumeCommand::Query, "ok"),
+            (VolumeCommand::Set(50), "vol set 50"),
+            (VolumeCommand::Inc(5), "vol inc 5"),
+            (VolumeCommand::Dec(5), "vol dec 5"),
+        ] {
+            let (percent, message) = tui_volume_outcome(command, Ok(observation.clone().into()));
+            assert_eq!(percent, Some(50));
+            assert_eq!(message, flash);
+            assert!(!message.contains("Volume:"), "{message}");
+            assert!(!message.contains("Gain:"), "{message}");
+        }
+        let clamped =
+            tui_volume_outcome(VolumeCommand::Inc(60), Ok(format_observation(100).into()));
+        assert_eq!(clamped, (Some(100), "vol inc 60".into()));
+        let error = tui_volume_outcome(
+            VolumeCommand::Set(50),
+            Err("volume set 999 is out of range; use an integer from 0 to 100".into()),
+        );
+        assert_eq!(error.0, None);
+        assert!(error.1.contains("out of range"), "{}", error.1);
+
+        let temporary = TempDir::new().unwrap();
+        let mut app = App::new(temporary.path().join("library.muse")).unwrap();
+        let (percent, message) = tui_volume_outcome(VolumeCommand::Set(50), Ok(observation.into()));
+        app.playback_view.volume = percent.unwrap();
+        app.message = message;
+        let rendered = screen(&mut app, 100, 24);
+        assert!(rendered.contains("vol: 50%"), "{rendered}");
+        assert!(rendered.contains("vol set 50"), "{rendered}");
+        assert!(!rendered.contains("Volume:"), "{rendered}");
+        assert!(!rendered.contains("Gain:"), "{rendered}");
+    }
+
+    #[test]
+    fn status_bar_shows_the_ui_volume_and_offline_volume_commands_fail() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = App::new(temporary.path().join("library.muse")).unwrap();
+        app.playback_view.volume = 37;
+        let rendered = screen(&mut app, 100, 24);
+        assert!(rendered.contains("vol: 37%"), "{rendered}");
+        assert!(!rendered.contains("Gain:"), "{rendered}");
+        app.execute_command("volume");
+        assert!(
+            app.message.contains("no playback service running"),
+            "{}",
+            app.message
+        );
+        app.execute_command("volume set 999");
+        assert!(app.message.contains("out of range"), "{}", app.message);
+        app.execute_command("volume inc abc");
+        assert!(app.message.contains("abc"), "{}", app.message);
+        assert_eq!(app.playback_view.volume, 37);
     }
 
     #[test]
@@ -3257,7 +3378,11 @@ mod tests {
         }
         let rendered = screen(&mut app, 100, 24);
         assert!(rendered.contains("Scanning: 3 audio files found"));
-        assert!(!rendered.contains('%'));
+        assert!(
+            !rendered.contains("%)"),
+            "scanning must not invent an import percentage: {rendered}"
+        );
+        assert!(rendered.contains("vol: 100%"));
         {
             let mut latest = progress.lock().unwrap();
             let snapshot = latest.as_mut().unwrap();

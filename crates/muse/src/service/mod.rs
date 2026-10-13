@@ -8,7 +8,8 @@ use crate::playback::{Current, View, Worker};
 pub(crate) use client::Client;
 pub(crate) use protocol::Command;
 use protocol::{Request, Response, TIMEOUT, VERSION};
-use runtime::{Endpoint, Runtime};
+use runtime::Endpoint;
+pub(crate) use runtime::Runtime;
 use std::{
     fs::{self, TryLockError},
     io,
@@ -166,7 +167,7 @@ pub(crate) fn run(path: &Path) -> Result<(), String> {
 
 pub(crate) fn run_with(
     path: &Path,
-    make_worker: impl FnOnce(&Path) -> Worker,
+    make_worker: impl FnOnce(&Path) -> Result<Worker, String>,
 ) -> Result<(), String> {
     let _library_ownership =
         muse_library::Library::open_existing(path).map_err(|e| e.to_string())?;
@@ -187,7 +188,7 @@ pub(crate) fn run_with(
         }
     }
     let cleanup = Cleanup(runtime.endpoint_path());
-    let worker = make_worker(&runtime.library);
+    let worker = make_worker(&runtime.library)?;
     let running = AtomicBool::new(true);
     let active = AtomicUsize::new(0);
     let controls = Mutex::new(());
@@ -340,9 +341,14 @@ pub(crate) fn control_text(path: &Path, command: Command) -> Result<String, Stri
         } else {
             view.playlist_name
         };
+        let volume_file = Runtime::existing(path)?
+            .ok_or_else(|| "library does not exist".to_string())?
+            .settings_path();
         output = format!(
-            "Track: {track}\nState: {state}\nPosition: {position:.3}s\nDuration: {duration}\nPlaylist: {playlist}\nMode: {}",
-            view.mode.label()
+            "Track: {track}\nState: {state}\nPosition: {position:.3}s\nDuration: {duration}\nPlaylist: {playlist}\nMode: {}\n{}\nVolume file: {}",
+            view.mode.label(),
+            crate::volume::format_observation(view.volume),
+            volume_file.display()
         );
         if let Some(index) = view.playlist_index {
             output.push_str(&format!("\nIndex: {}/{}", index + 1, view.playlist_len));
@@ -357,6 +363,26 @@ pub(crate) fn control_text(path: &Path, command: Command) -> Result<String, Stri
         output.push_str("Playback command completed");
     }
     Ok(output)
+}
+
+pub(crate) fn volume_text(
+    path: &Path,
+    command: crate::volume::VolumeCommand,
+) -> Result<String, String> {
+    let Some(remote) = Remote::find(path)? else {
+        return Err(
+            "no playback service running; volume commands need a live playback service".into(),
+        );
+    };
+    let view = match command {
+        crate::volume::VolumeCommand::Query => remote.call(Command::Status, None)?,
+        crate::volume::VolumeCommand::Set(volume) => {
+            remote.call(Command::SetVolume(volume), None)?
+        }
+        crate::volume::VolumeCommand::Inc(steps) => remote.call(Command::IncVolume(steps), None)?,
+        crate::volume::VolumeCommand::Dec(steps) => remote.call(Command::DecVolume(steps), None)?,
+    };
+    Ok(crate::volume::format_observation(view.volume))
 }
 
 pub(crate) fn control(path: &Path, command: Command) -> Result<(), String> {
