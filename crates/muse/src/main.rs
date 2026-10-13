@@ -105,13 +105,21 @@ fn arguments(mut arguments: impl Iterator<Item = OsString>) -> Result<Action, St
             return Ok(Action::Volume(library, arguments.collect()));
         } else if matches!(
             argument.to_str(),
-            Some("play" | "pause" | "stop" | "status" | "shutdown" | "next" | "mode")
+            Some("play" | "pause" | "stop" | "status" | "shutdown" | "next" | "next-once" | "mode")
         ) {
             if control.is_some() {
                 return Err("specify one playback command".into());
             }
             control = Some(match argument.to_str().unwrap() {
                 "next" => service::Command::Next,
+                "next-once" => {
+                    let id = arguments
+                        .next()
+                        .and_then(|value| value.to_str().and_then(|text| text.parse::<i64>().ok()))
+                        .filter(|id| *id > 0)
+                        .ok_or("next-once requires a positive database track ID")?;
+                    service::Command::PlayNextOnce(id)
+                }
                 "mode" => {
                     if arguments
                         .peek()
@@ -195,7 +203,7 @@ fn main() -> ExitCode {
     let result = match arguments(std::env::args_os().skip(1)) {
         Ok(Action::Help) => {
             println!(
-                "muse {}\n\nUsage: muse [--library <file>] [command | <operation>]\nDefault library: ./library.muse (local NetEase)\n\n{}\n\n--backup <copy>  Save a validated snapshot to a new file\n--restore <copy> Restore a v1/v2/v3 copy to a new library file\n--help, -h       Show help\n--version, -V    Show version\n\nWithout an operation, opens the TUI on the 全部本地 playlist. Enter plays the selected track inside the current playlist.\nr cycles sequential, list loop, and single loop. l opens full-screen lyrics; Esc closes them. While lyrics are scrolled away, l returns to the current line. Esc cancels a chooser.\nSpace pauses/resumes; Left/Right seeks 10s. :import imports local NCM/MP3/FLAC.\n:playlist creates or plays a playlist. :volume shows or changes application gain (set, inc, dec); it does not change the system volume. :q stops shared playback and exits; :detach keeps playback.\n\nDifferent audio is retained; equal tagged names group candidates for selection. No network API is used.\nVersion-1 and version-2 libraries require library upgrade after closing clients and shutting down the old service.\nUpgrade creates a verified pre-upgrade backup; reimport original files to recover previously skipped audio.",
+                "muse {}\n\nUsage: muse [--library <file>] [command | <operation>]\nDefault library: ./library.muse (local NetEase)\n\n{}\n\n--backup <copy>  Save a validated snapshot to a new file\n--restore <copy> Restore a v1/v2/v3 copy to a new library file\n--help, -h       Show help\n--version, -V    Show version\n\nWithout an operation, opens the TUI on the 全部本地 playlist. Enter plays the selected track inside the current playlist.\nr cycles sequential, list loop, and single loop. l opens full-screen lyrics; Esc closes them. While lyrics are scrolled away, l returns to the current line. Esc cancels a chooser.\nSpace pauses/resumes; Left/Right seeks 10s. :import imports local NCM/MP3/FLAC.\n:playlist creates or plays a playlist. :next queues the selected track to play once, then continues the same playlist.\nnext-once <track-id> does the same from the command line. :volume shows or changes application gain (set, inc, dec); it does not change the system volume. :q stops shared playback and exits; :detach keeps playback.\n\nDifferent audio is retained; equal tagged names group candidates for selection. No network API is used.\nVersion-1 and version-2 libraries require library upgrade after closing clients and shutting down the old service.\nUpgrade creates a verified pre-upgrade backup; reimport original files to recover previously skipped audio.",
                 env!("CARGO_PKG_VERSION"),
                 operations::HELP
             );

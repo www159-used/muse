@@ -19,6 +19,7 @@ pub enum BuiltinCommand {
     Quit,
     Stop,
     Playlist,
+    NextOnce,
     Volume,
 }
 
@@ -28,6 +29,7 @@ const COMMANDS: &[(&str, BuiltinCommand)] = &[
     ("quit", BuiltinCommand::Quit),
     ("stop", BuiltinCommand::Stop),
     ("detach", BuiltinCommand::Detach),
+    ("next", BuiltinCommand::NextOnce),
     ("playlist", BuiltinCommand::Playlist),
     ("volume", BuiltinCommand::Volume),
 ];
@@ -470,7 +472,7 @@ mod tests {
                 .map(|candidate| candidate.label.as_str())
                 .collect::<Vec<_>>(),
             [
-                "import", "q", "quit", "stop", "detach", "playlist", "volume"
+                "import", "q", "quit", "stop", "detach", "next", "playlist", "volume",
             ]
         );
         assert_eq!(input.selected(), None);

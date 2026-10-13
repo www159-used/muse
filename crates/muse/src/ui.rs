@@ -151,7 +151,7 @@ impl App {
             command: None,
             search_prompt: None,
             search: None,
-            message: "全部本地 is the current playlist. Enter plays inside it; r cycles mode; l opens lyrics. :import adds music.".into(),
+            message: "全部本地 is the current playlist. Enter plays inside it; r cycles mode; l opens lyrics. :import adds music. :next plays the selected track once.".into(),
             details: Vec::new(),
             details_focused: false,
             details_scroll: (0, 0),
@@ -877,6 +877,14 @@ impl App {
                 self.playlist_command(rest);
                 return;
             }
+            Some((BuiltinCommand::NextOnce, rest)) => {
+                if !rest.is_empty() {
+                    self.message = "Usage: :next".into();
+                    return;
+                }
+                self.queue_selected_next();
+                return;
+            }
             Some((BuiltinCommand::Volume, rest)) => {
                 self.volume_command(rest);
                 return;
@@ -1182,16 +1190,46 @@ impl App {
         self.message = format!("Current playlist: {}", playlist.name);
     }
 
+    fn queue_selected_next(&mut self) {
+        let Some(id) = self
+            .selection
+            .selected()
+            .and_then(|index| self.tracks.get(index))
+            .map(|track| track.id)
+        else {
+            self.message = "Select a track to play next once".into();
+            return;
+        };
+        if let Some(playback) = &self.playback {
+            self.message = match playback.play_next_once(id) {
+                Ok(()) => format!("Track {id} will play next once on the current playlist"),
+                Err(error) => error,
+            };
+        } else {
+            self.message = "Playback is not available".into();
+        }
+    }
+
     fn show_report(&mut self, report: ImportReport) {
+        let nothing = report.imported == 0
+            && report.duplicates == 0
+            && report.collisions == 0
+            && report.failed.is_empty()
+            && report.attachment_issues.is_empty()
+            && report.scan_issues.is_empty()
+            && report.stopped.is_none()
+            && !report.cancelled;
+        let outcome = if report.cancelled {
+            "cancelled"
+        } else if report.stopped.is_some() {
+            "stopped"
+        } else if nothing {
+            "nothing was imported"
+        } else {
+            "completed"
+        };
         self.message = format!(
-            "Import {}: added {}, skipped duplicates {}, failed {}, attachment/metadata issues {}, scan issues {}, retained collisions {}",
-            if report.cancelled {
-                "cancelled"
-            } else if report.stopped.is_some() {
-                "stopped"
-            } else {
-                "completed"
-            },
+            "Import {outcome}: added {}, skipped duplicates {}, failed {}, attachment/metadata issues {}, scan issues {}, retained collisions {}",
             report.imported,
             report.duplicates,
             report.failed.len(),
@@ -1199,6 +1237,22 @@ impl App {
             report.scan_issues.len(),
             report.collisions
         );
+        if !report.failed.is_empty() {
+            let failures = report
+                .failed
+                .iter()
+                .map(|issue| {
+                    let name = issue
+                        .path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| issue.path.display().to_string());
+                    format!("{name}: {}", issue.reason)
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            self.message.push_str(&format!(" — {failures}"));
+        }
         self.details = vec![self.message.clone()];
         if let Some(reason) = report.stopped {
             self.details.push(format!("Stopped: {reason}"));
@@ -1585,7 +1639,61 @@ impl App {
             })
             .map(|track| track.title.as_str())
             .unwrap_or("");
-        format!("{state} {title} {position}/{total} | {playlist} | {mode} | {volume}")
+        format!(
+            "{state} {title} {position}/{total} | {playlist} | {mode} | {volume} | {}",
+            self.next_hint()
+        )
+    }
+
+    fn next_hint(&self) -> String {
+        let explicit = self.playback_view.next_index;
+        let next_index = explicit.or_else(|| {
+            self.playback_view.playlist_index.and_then(|index| {
+                crate::playback::follower_index(
+                    self.playback_view.mode,
+                    index,
+                    self.playback_view.playlist_len,
+                )
+            })
+        });
+        let Some(next_index) = next_index else {
+            return "next: none".into();
+        };
+        if explicit.is_some()
+            && let Some(title) = self
+                .playback_view
+                .next_track_id
+                .and_then(|id| self.known_title(id))
+        {
+            return format!("next: {title}");
+        }
+        let title = self
+            .title_at_playlist_index(next_index)
+            .unwrap_or_else(|| "unknown".into());
+        format!("next: {title}")
+    }
+
+    fn known_title(&self, id: i64) -> Option<String> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.candidates.iter())
+            .chain(self.tracks.iter())
+            .find(|track| track.id == id)
+            .map(|track| track.title.clone())
+    }
+
+    fn title_at_playlist_index(&self, index: u32) -> Option<String> {
+        let playlist_id = self
+            .playback_view
+            .playlist_id
+            .or_else(|| self.library.all_local().ok().map(|playlist| playlist.id))?;
+        let index = usize::try_from(index).ok()?;
+        self.library
+            .playlist_tracks(playlist_id)
+            .ok()?
+            .into_iter()
+            .nth(index)
+            .map(|track| track.title)
     }
 
     fn draw_lyrics_top(&self, frame: &mut Frame, area: Rect) {
@@ -3801,6 +3909,44 @@ mod tests {
             .lines()
             .position(|line| line.contains(text))
             .unwrap_or_else(|| panic!("missing lyric {text}"))
+    }
+
+    #[test]
+    fn status_hint_names_the_following_track_when_the_snapshot_omits_it() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = App::new(temporary.path().join("library.muse")).unwrap();
+        let first = temporary.path().join("one.mp3");
+        let second = temporary.path().join("two.flac");
+        std::fs::write(
+            &first,
+            include_bytes!("../../muse-library/tests/fixtures/silence.mp3"),
+        )
+        .unwrap();
+        std::fs::write(
+            &second,
+            include_bytes!("../../muse-library/tests/fixtures/tone.flac"),
+        )
+        .unwrap();
+        assert_eq!(app.library.import(&first).imported, 1);
+        assert_eq!(app.library.import(&second).imported, 1);
+        app.reload_browser().unwrap();
+        let playlist = app.library.all_local().unwrap();
+        app.playback_view.playlist_id = Some(playlist.id);
+        app.playback_view.playlist_name = playlist.name;
+        app.playback_view.playlist_len = 2;
+        app.playback_view.playlist_index = Some(0);
+        app.playback_view.mode = crate::playback::RepeatMode::Sequential;
+        app.playback_view.next_index = None;
+        app.playback_view.next_track_id = None;
+        app.playback_view.status = Some(muse_playback::PlaybackStatus {
+            state: PlaybackState::Playing,
+            position: Duration::from_secs(1),
+            duration: Some(Duration::from_secs(3)),
+        });
+        assert_eq!(app.next_hint(), format!("next: {}", app.tracks[1].title));
+        assert!(screen(&mut app, 120, 24).contains(&format!("next: {}", app.tracks[1].title)));
+        app.playback_view.playlist_index = Some(1);
+        assert_eq!(app.next_hint(), "next: none");
     }
 
     #[test]

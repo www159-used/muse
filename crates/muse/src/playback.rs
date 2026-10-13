@@ -64,6 +64,9 @@ pub(crate) struct View {
     pub playlist_index: Option<u32>,
     pub playlist_len: u32,
     pub mode: RepeatMode,
+    /// 0-based index of the track that will play when the current one ends.
+    pub next_index: Option<u32>,
+    pub next_track_id: Option<i64>,
     /// Linear UI volume, 0–100. Amplitude uses [`muse_playback::perceptual_gain`].
     pub volume: u8,
 }
@@ -80,6 +83,8 @@ impl Default for View {
             playlist_index: None,
             playlist_len: 0,
             mode: RepeatMode::Sequential,
+            next_index: None,
+            next_track_id: None,
             volume: 100,
         }
     }
@@ -91,6 +96,8 @@ pub(crate) enum Action {
     PlayPlaylist(i64),
     UsePlaylist(i64),
     Next,
+    /// Play one playlist track next, then continue the same playlist.
+    PlayNextOnce(i64),
     CycleMode,
     SetMode(RepeatMode),
     Toggle,
@@ -110,6 +117,11 @@ struct PlaylistSession {
     order: Vec<i64>,
     index: Option<usize>,
     finish_handled: bool,
+    /// One track to play on the next advance. Not a second playlist.
+    insert_once: Option<i64>,
+    playing_once: bool,
+    /// Playlist index to continue from after the one-shot track.
+    resume_anchor: Option<usize>,
 }
 
 impl PlaylistSession {
@@ -121,7 +133,55 @@ impl PlaylistSession {
             .map(|index| u32::try_from(index).unwrap_or(u32::MAX));
         view.playlist_len = u32::try_from(self.order.len()).unwrap_or(u32::MAX);
         view.mode = self.mode;
+        match upcoming(self) {
+            Some((index, id)) => {
+                view.next_index = Some(u32::try_from(index).unwrap_or(u32::MAX));
+                view.next_track_id = Some(id);
+            }
+            None => {
+                view.next_index = None;
+                view.next_track_id = None;
+            }
+        }
     }
+}
+
+/// The track that starts when the current one finishes, including a one-shot insert.
+fn upcoming(session: &PlaylistSession) -> Option<(usize, i64)> {
+    if let Some(id) = session.insert_once {
+        let index = session.order.iter().position(|track| *track == id)?;
+        return Some((index, id));
+    }
+    let anchor = if session.playing_once {
+        session.resume_anchor?
+    } else {
+        session.index?
+    };
+    let index = continuation_index(session, anchor)?;
+    Some((index, *session.order.get(index)?))
+}
+
+/// 0-based playlist position of the track that plays when the one at `index` ends.
+/// Sequential playback has no follower on the last track. Track ids are not positions.
+pub(crate) fn follower_index(mode: RepeatMode, index: u32, len: u32) -> Option<u32> {
+    if len == 0 || index >= len {
+        return None;
+    }
+    match mode {
+        RepeatMode::Track => Some(index),
+        RepeatMode::Sequential => {
+            let next = index.saturating_add(1);
+            (next < len).then_some(next)
+        }
+        RepeatMode::List => Some(index.saturating_add(1) % len),
+    }
+}
+
+/// Where playback continues after `anchor` when the current track ends.
+fn continuation_index(session: &PlaylistSession, anchor: usize) -> Option<usize> {
+    let index = u32::try_from(anchor).ok()?;
+    let len = u32::try_from(session.order.len()).ok()?;
+    follower_index(session.mode, index, len).and_then(|next| usize::try_from(next).ok())
 }
 struct Request {
     expected: Option<Current>,
@@ -178,6 +238,9 @@ impl Worker {
                 order: Vec::new(),
                 index: None,
                 finish_handled: false,
+                insert_once: None,
+                playing_once: false,
+                resume_anchor: None,
             };
             let _ = refresh_order(&path, &mut session);
             macro_rules! task {
@@ -241,6 +304,23 @@ impl Worker {
                             Action::Next => match advance(&mut task!(), false) {
                                 Ok(true) => Ok(()),
                                 Ok(false) => Err("end of playlist".into()),
+                                Err(error) => Err(error),
+                            },
+                            Action::PlayNextOnce(id) => match refresh_order(&path, &mut session) {
+                                Ok(()) => {
+                                    place_index(&mut session, current);
+                                    if session.index.is_none() {
+                                        Err(
+                                            "no track loaded; press Enter to play the selected track"
+                                                .into(),
+                                        )
+                                    } else if !session.order.contains(&id) {
+                                        Err(format!("track {id} is not in the current playlist"))
+                                    } else {
+                                        session.insert_once = Some(id);
+                                        Ok(())
+                                    }
+                                }
                                 Err(error) => Err(error),
                             },
                             Action::CycleMode => {
@@ -570,8 +650,15 @@ fn advance<P: Playback, F: Fn() -> Result<P, String>>(
     automatic: bool,
 ) -> Result<bool, String> {
     refresh_order(task.path, task.session)?;
-    place_index(task.session, *task.current);
-    if automatic && task.session.mode == RepeatMode::Track {
+    if !task.session.playing_once {
+        place_index(task.session, *task.current);
+    }
+    // A one-shot insert is the next track. Single-loop still repeats when no insert is waiting.
+    if task.session.insert_once.is_none()
+        && !task.session.playing_once
+        && automatic
+        && task.session.mode == RepeatMode::Track
+    {
         match task.player.as_mut() {
             Some(player) => player.play().map_err(|error| error.to_string())?,
             None => {
@@ -579,6 +666,31 @@ fn advance<P: Playback, F: Fn() -> Result<P, String>>(
             }
         }
         task.session.finish_handled = false;
+        return Ok(true);
+    }
+    if let Some(id) = task.session.insert_once.take() {
+        if !task.session.playing_once {
+            task.session.resume_anchor = task.session.index;
+        }
+        task.session.playing_once = true;
+        if let Err(error) = load_track(task, id) {
+            task.session.playing_once = false;
+            task.session.resume_anchor = None;
+            return Err(error);
+        }
+        return Ok(true);
+    }
+    if task.session.playing_once {
+        task.session.playing_once = false;
+        let anchor = task.session.resume_anchor.take();
+        let Some(anchor) = anchor else {
+            return Ok(false);
+        };
+        let Some(index) = continuation_index(task.session, anchor) else {
+            return Ok(false);
+        };
+        let target = task.session.order[index];
+        load_track(task, target)?;
         return Ok(true);
     }
     let Some(index) = task.session.index else {
@@ -869,6 +981,8 @@ mod tests {
         assert_eq!(view.mode, RepeatMode::Sequential);
         assert_eq!(view.playlist_index, Some(0));
         assert_eq!(view.playlist_len, 2);
+        assert_eq!(view.next_index, Some(1));
+        assert_eq!(view.next_track_id, Some(ids[1]));
         finish.store(true, Ordering::Release);
         wait_until(&worker, |view| {
             view.current.is_some_and(|current| current.id == ids[1])
@@ -887,6 +1001,8 @@ mod tests {
             2,
             "sequential mode stops at the end"
         );
+        assert_eq!(worker.view().next_index, None);
+        assert_eq!(worker.view().next_track_id, None);
         worker
             .execute(Action::SetMode(RepeatMode::List), None)
             .unwrap();
@@ -896,9 +1012,11 @@ mod tests {
             view.current.is_some_and(|current| current.id == ids[0])
         });
         let plays_before = plays.load(Ordering::Acquire);
-        worker
+        let looped = worker
             .execute(Action::SetMode(RepeatMode::Track), None)
             .unwrap();
+        assert_eq!(looped.next_track_id, Some(ids[0]));
+        assert_eq!(looped.next_index, Some(0));
         finish.store(true, Ordering::Release);
         wait_until(&worker, |_| plays.load(Ordering::Acquire) > plays_before);
         thread::sleep(Duration::from_millis(80));
@@ -946,5 +1064,147 @@ mod tests {
         assert_eq!(reloaded.view().volume, 0);
         drop(reloaded);
         std::fs::remove_file(settings).unwrap();
+    }
+
+    #[test]
+    fn play_next_once_returns_to_the_same_playlist() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let path = temporary.path().join("library.muse");
+        let mut library = Library::open(&path).unwrap();
+        for (name, bytes) in [
+            (
+                "a.mp3",
+                &include_bytes!("../../muse-library/tests/fixtures/silence.mp3")[..],
+            ),
+            (
+                "b.flac",
+                &include_bytes!("../../muse-library/tests/fixtures/tone.flac")[..],
+            ),
+            (
+                "c.mp3",
+                &include_bytes!("../../muse-e2e/fixtures/tagged.mp3")[..],
+            ),
+        ] {
+            let file = temporary.path().join(name);
+            std::fs::write(&file, bytes).unwrap();
+            assert_eq!(library.import(&file).imported, 1);
+        }
+        let ids: Vec<_> = library
+            .playlist_tracks(library.all_local().unwrap().id)
+            .unwrap()
+            .into_iter()
+            .map(|track| track.id)
+            .collect();
+        let playlist = library.all_local().unwrap().id;
+        let playlist_name = library.all_local().unwrap().name;
+        drop(library);
+        let worker = Worker::start_with(path, || {
+            Ok(Scripted {
+                status: Mutex::new(PlaybackStatus {
+                    state: PlaybackState::Empty,
+                    position: Duration::ZERO,
+                    duration: None,
+                }),
+                finish: Arc::new(AtomicBool::new(false)),
+                loads: Arc::new(Mutex::new(Vec::new())),
+                plays: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                volume: Arc::new(std::sync::atomic::AtomicU8::new(100)),
+            })
+        })
+        .unwrap();
+        let started = worker
+            .execute(Action::PlayPlaylist(playlist), None)
+            .unwrap();
+        assert_eq!(started.playlist_name, playlist_name);
+        assert_eq!(started.current.unwrap().id, ids[0]);
+        assert_eq!(started.next_track_id, Some(ids[1]));
+        let queued = worker.execute(Action::PlayNextOnce(ids[2]), None).unwrap();
+        assert_eq!(queued.playlist_id, Some(playlist));
+        assert_eq!(queued.playlist_index, Some(0));
+        assert_eq!(queued.next_track_id, Some(ids[2]));
+        assert_eq!(queued.next_index, Some(2));
+        let once = worker.execute(Action::Next, None).unwrap();
+        assert_eq!(once.playlist_id, Some(playlist));
+        assert_eq!(once.current.unwrap().id, ids[2]);
+        assert_eq!(once.next_track_id, Some(ids[1]));
+        let continued = worker.execute(Action::Next, None).unwrap();
+        assert_eq!(continued.playlist_id, Some(playlist));
+        assert_eq!(continued.playlist_name, playlist_name);
+        assert_eq!(continued.current.unwrap().id, ids[1]);
+        assert_eq!(continued.playlist_index, Some(1));
+        assert_eq!(continued.mode, RepeatMode::Sequential);
+    }
+
+    #[test]
+    fn sequential_follower_is_the_next_position_until_the_last_track() {
+        assert_eq!(follower_index(RepeatMode::Sequential, 113, 168), Some(114));
+        assert_eq!(follower_index(RepeatMode::Sequential, 167, 168), None);
+        assert_eq!(follower_index(RepeatMode::List, 167, 168), Some(0));
+        assert_eq!(follower_index(RepeatMode::Track, 113, 168), Some(113));
+        assert_eq!(follower_index(RepeatMode::Sequential, 0, 0), None);
+    }
+
+    #[test]
+    fn load_in_the_middle_follows_playlist_position_when_ids_have_gaps() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let path = temporary.path().join("library.muse");
+        let mut library = Library::open(&path).unwrap();
+        for (name, bytes) in [
+            (
+                "a.mp3",
+                &include_bytes!("../../muse-library/tests/fixtures/silence.mp3")[..],
+            ),
+            (
+                "b.flac",
+                &include_bytes!("../../muse-library/tests/fixtures/tone.flac")[..],
+            ),
+            (
+                "c.mp3",
+                &include_bytes!("../../muse-e2e/fixtures/tagged.mp3")[..],
+            ),
+            (
+                "d.mp3",
+                &include_bytes!("../../muse-e2e/fixtures/other-artist.mp3")[..],
+            ),
+        ] {
+            let file = temporary.path().join(name);
+            std::fs::write(&file, bytes).unwrap();
+            assert_eq!(library.import(&file).imported, 1);
+        }
+        let removed = library.list().unwrap()[2].id;
+        assert!(library.remove(removed).unwrap());
+        let tracks = library
+            .playlist_tracks(library.all_local().unwrap().id)
+            .unwrap();
+        assert_eq!(tracks.len(), 3);
+        assert_ne!(
+            tracks[2].id,
+            tracks[1].id.saturating_add(1),
+            "the follower id must not be current id + 1"
+        );
+        let playlist = library.all_local().unwrap().id;
+        drop(library);
+        let worker = Worker::start_with(path, || {
+            Ok(Scripted {
+                status: Mutex::new(PlaybackStatus {
+                    state: PlaybackState::Empty,
+                    position: Duration::ZERO,
+                    duration: None,
+                }),
+                finish: Arc::new(AtomicBool::new(false)),
+                loads: Arc::new(Mutex::new(Vec::new())),
+                plays: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                volume: Arc::new(std::sync::atomic::AtomicU8::new(100)),
+            })
+        })
+        .unwrap();
+        let view = worker.execute(Action::Load(tracks[1].id), None).unwrap();
+        assert_eq!(view.playlist_id, Some(playlist));
+        assert_eq!(view.playlist_index, Some(1));
+        assert_eq!(view.playlist_len, 3);
+        assert_eq!(view.mode, RepeatMode::Sequential);
+        assert_eq!(view.next_index, Some(2));
+        assert_eq!(view.next_track_id, Some(tracks[2].id));
+        assert_ne!(view.next_track_id, Some(removed));
     }
 }

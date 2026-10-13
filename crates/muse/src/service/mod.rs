@@ -308,6 +308,7 @@ pub(crate) fn control_text(path: &Path, command: Command) -> Result<String, Stri
         | Command::PlayPlaylist(_)
         | Command::UsePlaylist(_)
         | Command::Next
+        | Command::PlayNextOnce(_)
         | Command::CycleMode
         | Command::SetMode(_) => Some(Remote::attach(path)?),
         _ => Remote::find(path)?,
@@ -321,48 +322,100 @@ pub(crate) fn control_text(path: &Path, command: Command) -> Result<String, Stri
         };
     };
     let view = remote.call(command, None)?;
-    let mut output = String::new();
-    if matches!(command, Command::Status) {
-        let state = view.status.map_or("Empty", |s| match s.state {
-            muse_playback::PlaybackState::Empty => "Empty",
-            muse_playback::PlaybackState::Ready => "Stopped",
-            muse_playback::PlaybackState::Playing => "Playing",
-            muse_playback::PlaybackState::Paused => "Paused",
-            muse_playback::PlaybackState::Finished => "Finished",
-        });
-        let track = view.current.map_or("none".into(), |t| t.id.to_string());
-        let position = view.status.map_or(0.0, |s| s.position.as_secs_f64());
-        let duration = view
-            .status
-            .and_then(|s| s.duration)
-            .map_or("unknown".into(), |d| format!("{:.3}s", d.as_secs_f64()));
-        let playlist = if view.playlist_name.is_empty() {
-            "none".to_owned()
-        } else {
-            view.playlist_name
-        };
-        let volume_file = Runtime::existing(path)?
-            .ok_or_else(|| "library does not exist".to_string())?
-            .settings_path();
-        output = format!(
-            "Track: {track}\nState: {state}\nPosition: {position:.3}s\nDuration: {duration}\nPlaylist: {playlist}\nMode: {}\n{}\nVolume file: {}",
-            view.mode.label(),
-            crate::volume::format_observation(view.volume),
-            volume_file.display()
-        );
-        if let Some(index) = view.playlist_index {
-            output.push_str(&format!("\nIndex: {}/{}", index + 1, view.playlist_len));
-        }
-        if let Some(id) = view.pending.filter(|id| *id > 0) {
-            output.push_str(&format!("\nLoading: {id}"));
-        }
-        if let Some(error) = view.error {
-            output.push_str(&format!("\nPlayback error: {error}"));
-        }
+    let output = if matches!(command, Command::Status) {
+        format_status(path, &view)?
     } else {
-        output.push_str("Playback command completed");
+        "Playback command completed".into()
+    };
+    Ok(output)
+}
+
+pub(crate) fn format_status(path: &Path, view: &crate::playback::View) -> Result<String, String> {
+    let state = view.status.map_or("Empty", |s| match s.state {
+        muse_playback::PlaybackState::Empty => "Empty",
+        muse_playback::PlaybackState::Ready => "Stopped",
+        muse_playback::PlaybackState::Playing => "Playing",
+        muse_playback::PlaybackState::Paused => "Paused",
+        muse_playback::PlaybackState::Finished => "Finished",
+    });
+    let track = view.current.map_or("none".into(), |t| t.id.to_string());
+    let position = view.status.map_or(0.0, |s| s.position.as_secs_f64());
+    let duration = view
+        .status
+        .and_then(|s| s.duration)
+        .map_or("unknown".into(), |d| format!("{:.3}s", d.as_secs_f64()));
+    let playlist = if view.playlist_name.is_empty() {
+        "none".to_owned()
+    } else {
+        view.playlist_name.clone()
+    };
+    let volume_file = Runtime::existing(path)?
+        .ok_or_else(|| "library does not exist".to_string())?
+        .settings_path();
+    let mut output = format!(
+        "Track: {track}\nState: {state}\nPosition: {position:.3}s\nDuration: {duration}\nPlaylist: {playlist}\nMode: {}\n{}\nVolume file: {}",
+        view.mode.label(),
+        crate::volume::format_observation(view.volume),
+        volume_file.display()
+    );
+    if let Some(index) = view.playlist_index {
+        output.push_str(&format!("\nIndex: {}/{}", index + 1, view.playlist_len));
+    }
+    // Older services omit next_index. The playlist position still decides the follower.
+    if view.playlist_index.is_some() || view.next_index.is_some() || view.next_track_id.is_some() {
+        match resolved_next(view) {
+            Some(index) => {
+                output.push_str(&format!("\nNext: {}/{}", index + 1, view.playlist_len));
+                if let Some(title) = next_title(path, view, index) {
+                    output.push_str(&format!("\nNext title: {title}"));
+                }
+            }
+            None => output.push_str("\nNext: none"),
+        }
+    }
+    if let Some(id) = view.pending.filter(|id| *id > 0) {
+        output.push_str(&format!("\nLoading: {id}"));
+    }
+    if let Some(error) = &view.error {
+        output.push_str(&format!("\nPlayback error: {error}"));
     }
     Ok(output)
+}
+
+fn resolved_next(view: &crate::playback::View) -> Option<u32> {
+    if let Some(index) = view.next_index {
+        return Some(index);
+    }
+    let index = view.playlist_index?;
+    crate::playback::follower_index(view.mode, index, view.playlist_len)
+}
+
+fn next_title(path: &Path, view: &crate::playback::View, index: u32) -> Option<String> {
+    if view.next_index.is_some()
+        && let Some(id) = view.next_track_id
+        && let Some(title) = track_title(path, id)
+    {
+        return Some(title);
+    }
+    let library = muse_library::Library::open(path).ok()?;
+    let playlist_id = view
+        .playlist_id
+        .or_else(|| library.all_local().ok().map(|playlist| playlist.id))?;
+    let index = usize::try_from(index).ok()?;
+    library
+        .playlist_tracks(playlist_id)
+        .ok()?
+        .into_iter()
+        .nth(index)
+        .map(|track| track.title)
+}
+
+fn track_title(path: &Path, id: i64) -> Option<String> {
+    muse_library::Library::open(path)
+        .ok()?
+        .track(id)
+        .ok()
+        .map(|track| track.title)
 }
 
 pub(crate) fn volume_text(
@@ -393,7 +446,11 @@ pub(crate) fn control(path: &Path, command: Command) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::playback::{Current, RepeatMode, View};
+    use muse_library::Library;
+    use muse_playback::{PlaybackState, PlaybackStatus};
     use std::io::{Read, Write};
+    use std::time::Duration;
 
     #[test]
     fn lost_reply_is_reported_without_replaying_the_mutation() {
@@ -450,5 +507,130 @@ mod tests {
         let mut byte = [0];
         assert!(matches!(stream.read(&mut byte), Ok(0) | Err(_)));
         peer.join().unwrap();
+    }
+
+    fn playing(index: u32, len: u32, mode: RepeatMode) -> View {
+        View {
+            current: Some(Current {
+                id: i64::from(index) + 1,
+                generation: 1,
+            }),
+            status: Some(PlaybackStatus {
+                state: PlaybackState::Playing,
+                position: Duration::from_secs(1),
+                duration: Some(Duration::from_secs(180)),
+            }),
+            playlist_name: "全部本地".into(),
+            playlist_index: Some(index),
+            playlist_len: len,
+            mode,
+            ..View::default()
+        }
+    }
+
+    #[test]
+    fn mid_list_sequential_status_names_the_following_position() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let path = temporary.path().join("library.muse");
+        Library::open(&path).unwrap();
+        let text = format_status(&path, &playing(113, 168, RepeatMode::Sequential)).unwrap();
+        assert!(text.contains("Index: 114/168"), "{text}");
+        assert!(text.contains("Next: 115/168"), "{text}");
+        assert!(text.contains("Volume:"), "{text}");
+        assert!(text.contains("Gain:"), "{text}");
+        assert!(text.contains("Volume file:"), "{text}");
+        assert!(!text.contains("Next: none"), "{text}");
+        assert!(!text.contains("Next title:"), "{text}");
+
+        let last = format_status(&path, &playing(167, 168, RepeatMode::Sequential)).unwrap();
+        assert!(last.contains("Index: 168/168"), "{last}");
+        assert!(last.contains("Next: none"), "{last}");
+        assert!(!last.contains("Next title:"), "{last}");
+
+        let wrapped = format_status(&path, &playing(167, 168, RepeatMode::List)).unwrap();
+        assert!(wrapped.contains("Next: 1/168"), "{wrapped}");
+        assert!(!wrapped.contains("Next: none"), "{wrapped}");
+
+        let repeated = format_status(&path, &playing(113, 168, RepeatMode::Track)).unwrap();
+        assert!(repeated.contains("Next: 114/168"), "{repeated}");
+        assert!(!repeated.contains("Next: none"), "{repeated}");
+
+        let idle = format_status(&path, &View::default()).unwrap();
+        assert!(idle.contains("Volume: 100%"), "{idle}");
+        assert!(idle.lines().all(|line| !line.starts_with("Next")));
+    }
+
+    #[test]
+    fn omitted_next_index_uses_playlist_position_not_track_id() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let path = temporary.path().join("library.muse");
+        let mut library = Library::open(&path).unwrap();
+        for (name, bytes) in [
+            (
+                "a.mp3",
+                &include_bytes!("../../../muse-library/tests/fixtures/silence.mp3")[..],
+            ),
+            (
+                "b.flac",
+                &include_bytes!("../../../muse-library/tests/fixtures/tone.flac")[..],
+            ),
+            (
+                "c.mp3",
+                &include_bytes!("../../../muse-e2e/fixtures/tagged.mp3")[..],
+            ),
+            (
+                "d.mp3",
+                &include_bytes!("../../../muse-e2e/fixtures/other-artist.mp3")[..],
+            ),
+        ] {
+            let file = temporary.path().join(name);
+            std::fs::write(&file, bytes).unwrap();
+            assert_eq!(library.import(&file).imported, 1);
+        }
+        let removed = library.list().unwrap()[2].id;
+        assert!(library.remove(removed).unwrap());
+        let playlist = library.all_local().unwrap();
+        let tracks = library.playlist_tracks(playlist.id).unwrap();
+        assert_eq!(tracks.len(), 3);
+        assert_ne!(tracks[2].id, tracks[1].id.saturating_add(1));
+        drop(library);
+
+        let mut view = playing(1, 3, RepeatMode::Sequential);
+        view.playlist_id = Some(playlist.id);
+        view.current = Some(Current {
+            id: tracks[1].id,
+            generation: 1,
+        });
+        view.next_index = None;
+        view.next_track_id = None;
+        let text = format_status(&path, &view).unwrap();
+        assert!(text.contains("Index: 2/3"), "{text}");
+        assert!(text.contains("Next: 3/3"), "{text}");
+        assert!(
+            text.contains(&format!("Next title: {}", tracks[2].title)),
+            "{text}"
+        );
+        assert!(!text.contains("Next: none"), "{text}");
+        assert!(
+            !text.contains(&format!("Next title: {}", tracks[1].title)),
+            "{text}"
+        );
+
+        let mut once = view.clone();
+        once.next_index = Some(0);
+        once.next_track_id = Some(tracks[0].id);
+        let queued = format_status(&path, &once).unwrap();
+        assert!(queued.contains("Next: 1/3"), "{queued}");
+        assert!(
+            queued.contains(&format!("Next title: {}", tracks[0].title)),
+            "{queued}"
+        );
+        assert!(!queued.contains("Next: 3/3"), "{queued}");
+
+        view.playlist_index = Some(2);
+        let end = format_status(&path, &view).unwrap();
+        assert!(end.contains("Index: 3/3"), "{end}");
+        assert!(end.contains("Next: none"), "{end}");
+        assert!(!end.contains("Next title:"), "{end}");
     }
 }

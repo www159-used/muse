@@ -209,6 +209,16 @@ fn advancing_fails(world: &mut ImportWorld) -> Result<()> {
     world.expect_advance_failed()
 }
 
+#[then(expr = "the next track index is {int} of {int}")]
+fn next_track_index(world: &mut ImportWorld, index: usize, len: usize) -> Result<()> {
+    assert_eq!(
+        world.status_line("Next")?,
+        format!("{index}/{len}"),
+        "next track index"
+    );
+    Ok(())
+}
+
 #[then(expr = "the playback volume is {string}")]
 fn playback_volume(world: &mut ImportWorld, volume: String) -> Result<()> {
     assert_eq!(world.status_line("Volume")?, volume, "playback volume");
@@ -253,6 +263,100 @@ fn volume_file(world: &mut ImportWorld) -> Result<()> {
         stored["volume"].to_string(),
         percent,
         "volume file {path} does not match status"
+    );
+    Ok(())
+}
+
+#[then("there is no next track")]
+fn no_next_track(world: &mut ImportWorld) -> Result<()> {
+    assert_eq!(world.status_line("Next")?, "none", "next track");
+    Ok(())
+}
+
+#[then(expr = "the next track title is the title of fixture {string}")]
+fn next_track_title(world: &mut ImportWorld, fixture: String) -> Result<()> {
+    let expected = world.track_for_fixture(&fixture)?;
+    assert_eq!(
+        world.status_line("Next title")?,
+        expected.title,
+        "next track title"
+    );
+    Ok(())
+}
+
+#[then(expr = "the current track title is the title of fixture {string}")]
+fn current_track_title(world: &mut ImportWorld, fixture: String) -> Result<()> {
+    let expected = world.track_for_fixture(&fixture)?;
+    let id: i64 = world
+        .status_line("Track")?
+        .parse()
+        .map_err(|_| "current track id is not a number")?;
+    let actual = world.library.track(id)?;
+    assert_eq!(actual.id, expected.id, "current track");
+    assert_eq!(actual.title, expected.title, "current track title");
+    Ok(())
+}
+
+#[then(expr = "the import reports a failure for {string}")]
+fn import_failure(world: &mut ImportWorld, name: String) -> Result<()> {
+    let report = world.report()?;
+    let issue = report
+        .failed
+        .iter()
+        .find(|issue| issue.path.file_name().and_then(|file| file.to_str()) == Some(name.as_str()))
+        .ok_or_else(|| {
+            format!(
+                "no import failure for {name}; failures: {:?}",
+                report.failed
+            )
+        })?;
+    assert!(
+        !issue.reason.trim().is_empty(),
+        "failure for {name} has no reason"
+    );
+    Ok(())
+}
+
+#[then("the previously failed track is added")]
+fn previously_failed_added(world: &mut ImportWorld) -> Result<()> {
+    let name = world.failed_name()?;
+    assert_eq!(world.report()?.imported, 1, "added track count");
+    let tracks = world.library.list()?;
+    let found = tracks.iter().any(|track| {
+        world
+            .library
+            .observations(track.id)
+            .ok()
+            .into_iter()
+            .flatten()
+            .any(|source| {
+                Path::new(&source.path)
+                    .file_name()
+                    .and_then(|file| file.to_str())
+                    == Some(name)
+            })
+    });
+    assert!(
+        found,
+        "library is missing the previously failed file {name}"
+    );
+    Ok(())
+}
+
+#[then("the import reports that nothing was imported")]
+fn nothing_imported(world: &mut ImportWorld) -> Result<()> {
+    let report = world.report()?;
+    assert_eq!(report.imported, 0, "added track count");
+    assert_eq!(report.duplicates, 0, "skipped duplicate count");
+    assert_eq!(report.collisions, 0, "retained collision count");
+    assert!(
+        report.failed.is_empty(),
+        "failed sources: {:?}",
+        report.failed
+    );
+    assert!(
+        world.library.list()?.is_empty(),
+        "library should stay empty"
     );
     Ok(())
 }
