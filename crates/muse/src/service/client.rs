@@ -105,15 +105,12 @@ impl Client {
     pub fn load(&self, id: i64) -> Result<(), String> {
         self.send(Command::Load(id))
     }
-    #[allow(dead_code)]
     pub fn play_playlist(&self, id: i64) -> Result<(), String> {
         self.send(Command::PlayPlaylist(id))
     }
-    #[allow(dead_code)]
     pub fn use_playlist(&self, id: i64) -> Result<(), String> {
         self.send(Command::UsePlaylist(id))
     }
-    #[allow(dead_code)]
     pub fn cycle_mode(&self) -> Result<(), String> {
         self.send(Command::CycleMode)
     }

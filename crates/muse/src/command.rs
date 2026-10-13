@@ -18,6 +18,7 @@ pub enum BuiltinCommand {
     Detach,
     Quit,
     Stop,
+    Playlist,
 }
 
 const COMMANDS: &[(&str, BuiltinCommand)] = &[
@@ -26,6 +27,7 @@ const COMMANDS: &[(&str, BuiltinCommand)] = &[
     ("quit", BuiltinCommand::Quit),
     ("stop", BuiltinCommand::Stop),
     ("detach", BuiltinCommand::Detach),
+    ("playlist", BuiltinCommand::Playlist),
 ];
 
 impl BuiltinCommand {
@@ -38,7 +40,8 @@ impl BuiltinCommand {
             .iter()
             .find(|(registered, _)| *registered == name)?
             .1;
-        (command == Self::Import || rest.is_empty()).then_some((command, rest))
+        (matches!(command, Self::Import | Self::Playlist) || rest.is_empty())
+            .then_some((command, rest))
     }
 }
 
@@ -195,8 +198,8 @@ impl CommandLine {
             let prefix = self.text[..self.text.len() - name.len()].to_owned();
             let commands: Vec<&str> = if self.repl {
                 vec![
-                    "import", "list", "show", "play", "pause", "stop", "status", "shutdown",
-                    "library", "help", "q", "quit", "detach",
+                    "import", "list", "show", "play", "next", "pause", "stop", "status",
+                    "shutdown", "mode", "playlist", "library", "help", "q", "quit", "detach",
                 ]
             } else {
                 COMMANDS.iter().map(|(name, _)| *name).collect()
@@ -219,8 +222,10 @@ impl CommandLine {
             1 => {
                 self.apply(&target, &candidates[0].value);
                 if matches!(target, CompletionTarget::Commands { .. })
-                    && BuiltinCommand::parse(self.text()).map(|(command, _)| command)
-                        == Some(BuiltinCommand::Import)
+                    && matches!(
+                        BuiltinCommand::parse(self.text()).map(|(command, _)| command),
+                        Some(BuiltinCommand::Import | BuiltinCommand::Playlist)
+                    )
                 {
                     self.insert(' ');
                 }
@@ -461,14 +466,14 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.label.as_str())
                 .collect::<Vec<_>>(),
-            ["import", "q", "quit", "stop", "detach"]
+            ["import", "q", "quit", "stop", "detach", "playlist"]
         );
         assert_eq!(input.selected(), None);
         for (reverse, expected) in [
             (false, "import"),
             (false, "q"),
             (true, "import"),
-            (true, "detach"),
+            (true, "playlist"),
             (false, "import"),
         ] {
             complete(&mut input, reverse);
@@ -489,7 +494,7 @@ mod tests {
         assert!(alias.candidates().is_empty());
         let mut reverse = line("");
         complete(&mut reverse, true);
-        assert_eq!(reverse.text(), "detach");
+        assert_eq!(reverse.text(), "playlist");
     }
 
     #[test]

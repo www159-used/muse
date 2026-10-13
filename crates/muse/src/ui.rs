@@ -20,7 +20,8 @@ use crossterm::event::{
     KeyModifiers, MouseEvent, MouseEventKind,
 };
 use muse_library::{
-    ImportPhase, ImportProgress, ImportReport, Library, LibraryError, SongGroup, Track,
+    AttachmentKind, ImportPhase, ImportProgress, ImportReport, Library, LibraryError, SongGroup,
+    Track,
 };
 use muse_playback::{PlaybackState, SeekTarget};
 use ratatui::{
@@ -80,6 +81,17 @@ struct Chooser {
     selection: ListState,
 }
 
+#[derive(Clone)]
+enum Browser {
+    Library,
+    Playlist { id: i64, name: String },
+}
+
+struct LyricLine {
+    at: Option<Duration>,
+    text: String,
+}
+
 struct App {
     library: Library,
     library_path: PathBuf,
@@ -98,6 +110,11 @@ struct App {
     details_scroll: (u16, u16),
     songs_area: Rect,
     results_area: Rect,
+    browser: Browser,
+    lyrics_open: bool,
+    lyrics_track: Option<i64>,
+    lyrics_lines: Vec<LyricLine>,
+    lyrics_selection: ListState,
     navigation_count: Option<usize>,
     pending_g: bool,
     worker: Option<ImportWorker>,
@@ -111,7 +128,8 @@ impl App {
     fn new(path: PathBuf) -> Result<Self, LibraryError> {
         let library = Library::open(&path)?;
         let groups = library.groups()?;
-        let tracks: Vec<_> = groups.iter().map(|g| g.candidates[0].clone()).collect();
+        let all_local = library.all_local()?;
+        let tracks = library.playlist_tracks(all_local.id)?;
         let library_name = library.descriptor()?.name;
         let mut selection = ListState::default();
         if !tracks.is_empty() {
@@ -129,14 +147,20 @@ impl App {
             command: None,
             search_prompt: None,
             search: None,
-            message:
-                "Use :import <audio file or folder> to import music; Enter plays the selected track"
-                    .into(),
+            message: "全部本地 is the current playlist. Enter plays inside it; r cycles mode; l toggles lyrics. :import adds music.".into(),
             details: Vec::new(),
             details_focused: false,
             details_scroll: (0, 0),
             songs_area: Rect::default(),
             results_area: Rect::default(),
+            browser: Browser::Playlist {
+                id: all_local.id,
+                name: all_local.name,
+            },
+            lyrics_open: false,
+            lyrics_track: None,
+            lyrics_lines: Vec::new(),
+            lyrics_selection: ListState::default(),
             navigation_count: None,
             pending_g: false,
             worker: None,
@@ -315,6 +339,17 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(distance),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-distance),
+            KeyCode::Char('l') => {
+                self.lyrics_open = !self.lyrics_open;
+                self.lyrics_track = Some(-1);
+                self.lyrics_lines.clear();
+                self.message = if self.lyrics_open {
+                    "Lyrics panel shown".into()
+                } else {
+                    "Lyrics panel hidden".into()
+                };
+            }
+            KeyCode::Char('r') => self.cycle_repeat(),
             KeyCode::Enter => self.play_selected(),
             KeyCode::Char(' ') => {
                 if self.playback_view.current.is_none() && self.playback_view.pending.is_none() {
@@ -632,8 +667,16 @@ impl App {
             .unwrap_or_default();
         for update in updates {
             match update {
-                Ok(groups) if groups != self.groups => self.apply_groups(groups),
-                Ok(_) => {}
+                Ok(groups) => match &self.browser {
+                    Browser::Library if groups != self.groups => self.apply_groups(groups),
+                    Browser::Library => {}
+                    Browser::Playlist { .. } => {
+                        self.groups = groups;
+                        if let Err(error) = self.reload_browser() {
+                            self.message = format!("Cannot refresh library; retrying: {error}");
+                        }
+                    }
+                },
                 Err(e) => self.message = format!("Cannot refresh library; retrying: {e}"),
             }
         }
@@ -800,6 +843,10 @@ impl App {
                 return;
             }
             Some((BuiltinCommand::Import, rest)) => rest,
+            Some((BuiltinCommand::Playlist, rest)) => {
+                self.playlist_command(rest);
+                return;
+            }
             None => {
                 self.message = format!("Unknown command: {input}");
                 return;
@@ -863,9 +910,222 @@ impl App {
             }
         }
         if self.refresh.is_none() {
-            self.apply_groups(self.library.groups()?);
+            self.reload_browser()?;
         }
         Ok(())
+    }
+
+    fn reload_browser(&mut self) -> Result<(), LibraryError> {
+        match self.browser.clone() {
+            Browser::Library => self.apply_groups(self.library.groups()?),
+            Browser::Playlist { id, .. } => {
+                self.groups = self.library.groups()?;
+                match self.library.playlist_tracks(id) {
+                    Ok(tracks) => self.replace_tracks(tracks),
+                    Err(LibraryError::PlaylistNotFound(_)) => {
+                        let all_local = self.library.all_local()?;
+                        self.browser = Browser::Playlist {
+                            id: all_local.id,
+                            name: all_local.name,
+                        };
+                        let tracks = self.library.playlist_tracks(all_local.id)?;
+                        self.replace_tracks(tracks);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn replace_tracks(&mut self, tracks: Vec<Track>) {
+        let old_row = self.selection.selected().unwrap_or(0);
+        let selected = self.tracks.get(old_row).map(|track| track.id);
+        self.tracks = tracks;
+        self.selection.select(if self.tracks.is_empty() {
+            None
+        } else {
+            Some(
+                selected
+                    .and_then(|id| self.tracks.iter().position(|track| track.id == id))
+                    .unwrap_or(old_row.min(self.tracks.len() - 1)),
+            )
+        });
+        self.reveal_selection();
+        let search_tracks = self.search_tracks();
+        if let Some(search) = &mut self.search {
+            search.refresh(&search_tracks);
+        }
+        self.update_search_preview();
+    }
+
+    fn cycle_repeat(&mut self) {
+        if let Some(playback) = &self.playback {
+            self.message = match playback.cycle_mode() {
+                Ok(()) => {
+                    let mode = playback.view().mode;
+                    self.playback_view.mode = mode;
+                    format!("Playback mode: {}", mode.label())
+                }
+                Err(error) => error,
+            };
+        } else {
+            self.playback_view.mode = self.playback_view.mode.cycle();
+            self.message = format!("Playback mode: {}", self.playback_view.mode.label());
+        }
+    }
+
+    fn playlist_command(&mut self, rest: &str) {
+        let rest = rest.trim();
+        if rest.is_empty() || rest == "list" {
+            self.show_playlist_list();
+            return;
+        }
+        if rest == "library" {
+            self.browser = Browser::Library;
+            match self.library.groups() {
+                Ok(groups) => {
+                    self.apply_groups(groups);
+                    self.message =
+                        "Showing the library. :playlist use <name> returns to a playlist.".into();
+                }
+                Err(error) => self.message = error.to_string(),
+            }
+            return;
+        }
+        if rest == "new" || rest.starts_with("new ") {
+            let name = rest["new".len()..].trim();
+            if name.is_empty() {
+                self.message = "Usage: :playlist new <name>".into();
+                return;
+            }
+            self.message = match self.library.create_playlist(name) {
+                Ok(playlist) => format!("Created playlist {} ({})", playlist.name, playlist.id),
+                Err(error) => error.to_string(),
+            };
+            return;
+        }
+        let (action, argument) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let argument = argument.trim();
+        match action {
+            "add" => self.add_to_named_playlist(argument),
+            "use" => self.activate_playlist(argument, false),
+            "play" => self.activate_playlist(argument, true),
+            _ => {
+                self.message =
+                    "Usage: :playlist list | new <name> | add <playlist> [track] | use <playlist> | play <playlist> | library"
+                        .into();
+            }
+        }
+    }
+
+    fn show_playlist_list(&mut self) {
+        match self.library.playlists() {
+            Ok(playlists) => {
+                self.details = playlists
+                    .iter()
+                    .map(|playlist| {
+                        let kind = match playlist.kind {
+                            muse_library::PlaylistKind::AllLocal => "all-local",
+                            muse_library::PlaylistKind::User => "user",
+                        };
+                        format!(
+                            "{}\t{}\t{}\t{} tracks",
+                            playlist.id, playlist.name, kind, playlist.len
+                        )
+                    })
+                    .collect();
+                self.details_scroll = (0, 0);
+                self.message = "Playlists listed in the results panel".into();
+            }
+            Err(error) => self.message = error.to_string(),
+        }
+    }
+
+    fn add_to_named_playlist(&mut self, argument: &str) {
+        if argument.is_empty() {
+            self.message = "Usage: :playlist add <playlist> [track-id]".into();
+            return;
+        }
+        let (playlist, track) = split_playlist_target(argument);
+        let track_id = if let Some(track) = track {
+            match track.parse::<i64>() {
+                Ok(id) if id > 0 => id,
+                _ => {
+                    self.message = "playlist add requires a positive track ID".into();
+                    return;
+                }
+            }
+        } else {
+            match self
+                .selection
+                .selected()
+                .and_then(|index| self.tracks.get(index))
+                .map(|track| track.id)
+            {
+                Some(id) => id,
+                None => {
+                    self.message = "Select a track before adding it to a playlist".into();
+                    return;
+                }
+            }
+        };
+        let playlist_id = match crate::operations::resolve_playlist(&self.library, playlist) {
+            Ok(id) => id,
+            Err(error) => {
+                self.message = error;
+                return;
+            }
+        };
+        self.message = match self.library.add_to_playlist(playlist_id, track_id) {
+            Ok(true) => format!("Added track {track_id} to playlist {playlist_id}"),
+            Ok(false) => format!("Track {track_id} is already in playlist {playlist_id}"),
+            Err(error) => error.to_string(),
+        };
+    }
+
+    fn activate_playlist(&mut self, token: &str, play: bool) {
+        let (token, extra) = split_playlist_target(token);
+        if token.is_empty() || extra.is_some() {
+            self.message = "Usage: :playlist use <playlist> or :playlist play <playlist>".into();
+            return;
+        }
+        let playlist_id = match crate::operations::resolve_playlist(&self.library, token) {
+            Ok(id) => id,
+            Err(error) => {
+                self.message = error;
+                return;
+            }
+        };
+        let playlist = match self.library.playlist(playlist_id) {
+            Ok(playlist) => playlist,
+            Err(error) => {
+                self.message = error.to_string();
+                return;
+            }
+        };
+        let tracks = match self.library.playlist_tracks(playlist.id) {
+            Ok(tracks) => tracks,
+            Err(error) => {
+                self.message = error.to_string();
+                return;
+            }
+        };
+        self.browser = Browser::Playlist {
+            id: playlist.id,
+            name: playlist.name.clone(),
+        };
+        self.replace_tracks(tracks);
+        if play {
+            if let Some(playback) = &self.playback {
+                self.playback_message(playback.play_playlist(playlist.id));
+                return;
+            }
+        } else if let Some(playback) = &self.playback {
+            self.playback_message(playback.use_playlist(playlist.id));
+            return;
+        }
+        self.message = format!("Current playlist: {}", playlist.name);
     }
 
     fn show_report(&mut self, report: ImportReport) {
@@ -917,20 +1177,33 @@ impl App {
             Constraint::Length(1),
         ])
         .areas(frame.area());
+        let list_name = match &self.browser {
+            Browser::Library => "Library".to_owned(),
+            Browser::Playlist { name, .. } => name.clone(),
+        };
         frame.render_widget(
             Paragraph::new(format!(
-                "muse | {} [netease] | {} groups",
+                "muse | {} [local·NetEase] | {} | {} tracks",
                 self.library_name,
+                list_name,
                 self.tracks.len()
             ))
             .style(Style::default().fg(Color::Cyan)),
             title,
         );
+        let (main, lyrics_area) = if self.lyrics_open {
+            let [left, right] =
+                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .areas(body);
+            (left, Some(right))
+        } else {
+            (body, None)
+        };
         let [songs, results] =
-            Layout::vertical([Constraint::Percentage(65), Constraint::Percentage(35)]).areas(body);
+            Layout::vertical([Constraint::Percentage(65), Constraint::Percentage(35)]).areas(main);
         let library_title = self.active_search().map_or_else(
-            || "Library".into(),
-            |search| format!("Library | {}", search.label(self.selection.selected())),
+            || list_name.clone(),
+            |search| format!("{list_name} | {}", search.label(self.selection.selected())),
         );
         let songs_block = Block::default()
             .borders(Borders::ALL)
@@ -1024,6 +1297,9 @@ impl App {
                     .scroll(self.details_scroll),
                 results,
             );
+        }
+        if let Some(area) = lyrics_area {
+            self.draw_lyrics(frame, area);
         }
         let playback_status = self.playback_line();
         let status_text = match &import {
@@ -1211,14 +1487,23 @@ impl App {
     }
 
     fn playback_line(&self) -> String {
+        let playlist = if self.playback_view.playlist_name.is_empty() {
+            match &self.browser {
+                Browser::Playlist { name, .. } => name.clone(),
+                Browser::Library => muse_library::ALL_LOCAL_PLAYLIST.to_owned(),
+            }
+        } else {
+            self.playback_view.playlist_name.clone()
+        };
+        let mode = self.playback_view.mode.label();
         if let Some(error) = &self.playback_view.error {
-            return format!("Playback error: {error}");
+            return format!("Playback error: {error} | {playlist} | {mode}");
         }
         if self.playback_view.pending.is_some() {
-            return "Loading track...".into();
+            return format!("Loading track... | {playlist} | {mode}");
         }
         let Some(status) = self.playback_view.status else {
-            return "Not playing".into();
+            return format!("Not playing | {playlist} | {mode}");
         };
         let state = match status.state {
             PlaybackState::Empty => "Empty",
@@ -1244,8 +1529,170 @@ impl App {
             })
             .map(|track| track.title.as_str())
             .unwrap_or("");
-        format!("{state} {title} {position}/{total}")
+        format!("{state} {title} {position}/{total} | {playlist} | {mode}")
     }
+
+    fn draw_lyrics(&mut self, frame: &mut Frame, area: Rect) {
+        self.sync_lyrics();
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Lyrics | l hides")
+            .border_style(Style::default().fg(Color::Magenta));
+        let inner = block.inner(area);
+        if self.playback_view.current.is_none() {
+            frame.render_widget(Paragraph::new("Nothing is playing").block(block), area);
+            return;
+        }
+        if self.lyrics_lines.is_empty() {
+            frame.render_widget(
+                Paragraph::new("No lyrics stored for this track").block(block),
+                area,
+            );
+            return;
+        }
+        self.reveal_lyric(inner.height);
+        let items: Vec<ListItem> = self
+            .lyrics_lines
+            .iter()
+            .map(|line| {
+                let label = match line.at {
+                    Some(at) => format!("[{}] {}", time_label(at), line.text),
+                    None => line.text.clone(),
+                };
+                ListItem::new(label)
+            })
+            .collect();
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(block)
+                .highlight_style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .highlight_symbol("› "),
+            area,
+            &mut self.lyrics_selection,
+        );
+    }
+
+    fn sync_lyrics(&mut self) {
+        let id = self.playback_view.current.map(|current| current.id);
+        if id == self.lyrics_track {
+            return;
+        }
+        self.lyrics_track = id;
+        self.lyrics_lines = id
+            .and_then(|id| self.library.attachments(id).ok())
+            .and_then(|attachments| {
+                attachments
+                    .into_iter()
+                    .find(|attachment| attachment.kind == AttachmentKind::Lyrics)
+            })
+            .map(|attachment| parse_lrc(&String::from_utf8_lossy(&attachment.data)))
+            .unwrap_or_default();
+        self.lyrics_selection.select(None);
+        *self.lyrics_selection.offset_mut() = 0;
+    }
+
+    fn reveal_lyric(&mut self, height: u16) {
+        let selected = self.active_lyric();
+        self.lyrics_selection.select(selected);
+        let Some(selected) = selected else {
+            return;
+        };
+        let height = usize::from(height.max(1));
+        let len = self.lyrics_lines.len();
+        let lower = selected.saturating_add(1).saturating_sub(height);
+        let upper = selected.min(len.saturating_sub(height));
+        let offset = self.lyrics_selection.offset_mut();
+        *offset = (*offset).clamp(lower, upper);
+    }
+
+    fn active_lyric(&self) -> Option<usize> {
+        let position = self.playback_view.status?.position;
+        self.lyrics_lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.at.is_some_and(|at| at <= position))
+            .map(|(index, _)| index)
+            .next_back()
+    }
+}
+
+fn split_playlist_target(argument: &str) -> (&str, Option<&str>) {
+    if let Some((name, track)) = argument.rsplit_once(char::is_whitespace)
+        && track.parse::<i64>().ok().is_some_and(|id| id > 0)
+    {
+        (name.trim(), Some(track))
+    } else {
+        (argument.trim(), None)
+    }
+}
+
+fn parse_lrc(text: &str) -> Vec<LyricLine> {
+    let mut offset_ms = 0_i64;
+    let mut lines = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if let Some(value) = line
+            .strip_prefix("[offset:")
+            .and_then(|value| value.strip_suffix(']'))
+        {
+            if let Ok(parsed) = value.trim().parse::<i64>() {
+                offset_ms = parsed;
+            }
+            continue;
+        }
+        let mut rest = line;
+        let mut times = Vec::new();
+        while let Some(end) = rest.strip_prefix('[').and_then(|body| body.find(']')) {
+            let tag = &rest[1..end + 1];
+            let Some(millis) = timestamp_millis(tag) else {
+                break;
+            };
+            times.push(millis);
+            rest = &rest[end + 2..];
+        }
+        let text = rest.trim();
+        if times.is_empty() {
+            if !text.is_empty() && !line.starts_with('[') {
+                lines.push(LyricLine {
+                    at: None,
+                    text: text.to_owned(),
+                });
+            }
+            continue;
+        }
+        for millis in times {
+            let adjusted = millis + offset_ms;
+            let at = (adjusted > 0).then(|| Duration::from_millis(adjusted as u64));
+            lines.push(LyricLine {
+                at,
+                text: text.to_owned(),
+            });
+        }
+    }
+    lines.sort_by(|left, right| match (left.at, right.at) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (Some(left), Some(right)) => left.cmp(&right),
+    });
+    lines
+}
+
+fn timestamp_millis(tag: &str) -> Option<i64> {
+    let (minutes, seconds) = tag.split_once(':')?;
+    if !minutes.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    let minutes = minutes.parse::<i64>().ok()?;
+    let seconds = seconds.parse::<f64>().ok()?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return None;
+    }
+    Some(minutes * 60_000 + (seconds * 1000.0).round() as i64)
 }
 
 /// Compose modern Hangul in display labels; file access keeps the original path.
@@ -1350,6 +1797,8 @@ pub(crate) fn terminal_disconnected() -> std::io::Result<bool> {
             .revents()
             .intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL)),
         Err(rustix::io::Errno::INTR) => Ok(false),
+        // The pty slave is gone. Reporting that through the same terminal panics.
+        Err(rustix::io::Errno::NXIO) => Ok(true),
         Err(error) => Err(error.into()),
     }
 }
@@ -1521,7 +1970,7 @@ mod tests {
         normal_keys(&mut app, "/moon");
         assert_eq!(app.selection.selected(), Some(22));
         let preview = screen(&mut app, 100, 24);
-        assert!(preview.contains("Library | /moon | 1/3 matches"));
+        assert!(preview.contains("全部本地 | /moon | 1/3 matches"));
         assert!(preview.contains("› 23 Track 023"));
         assert!(preview.lines().last().unwrap().starts_with(" COMMAND "));
         assert!(preview.lines().last().unwrap().contains("/moon"));
@@ -1611,7 +2060,7 @@ mod tests {
         normal_keys(&mut app, "/");
         app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.selection.selected(), Some(70));
-        assert!(screen(&mut app, 100, 24).contains("Library | /match | 3/3 matches"));
+        assert!(screen(&mut app, 100, 24).contains("全部本地 | /match | 3/3 matches"));
         normal_keys(&mut app, "n");
         assert_eq!(app.selection.selected(), Some(2));
         normal_keys(&mut app, "?");
@@ -1791,9 +2240,9 @@ mod tests {
         assert!(buffer[(6, 7)].modifier.contains(Modifier::BOLD));
         assert_ne!(buffer[(6, 6)].fg, Color::Yellow);
         normal_keys(&mut app, "j");
-        assert!(screen(&mut app, 100, 24).contains("Library | /moon | 0/2 matches"));
+        assert!(screen(&mut app, 100, 24).contains("全部本地 | /moon | 0/2 matches"));
         normal_keys(&mut app, "n");
-        assert!(screen(&mut app, 100, 24).contains("Library | /moon | 2/2 matches"));
+        assert!(screen(&mut app, 100, 24).contains("全部本地 | /moon | 2/2 matches"));
         assert_eq!(app.tracks.len(), 20);
     }
 
@@ -2472,11 +2921,11 @@ mod tests {
         assert!(rendered.contains("Commands"));
         assert!(!rendered.contains("Paths"));
         assert!(rendered.lines().last().unwrap().starts_with(" COMMAND "));
-        for command in ["import", "q", "quit", "stop", "detach"] {
+        for command in ["import", "q", "quit", "stop", "detach", "playlist"] {
             assert!(rendered.contains(command));
         }
         app.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert_eq!(app.command.as_ref().unwrap().text(), "detach");
+        assert_eq!(app.command.as_ref().unwrap().text(), "playlist");
         app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.command.as_ref().unwrap().text(), "import");
         for (width, height) in [(16, 4), (1, 1)] {
@@ -2920,5 +3369,99 @@ mod tests {
         let query = Search::new("needle", Direction::Forward, &app.search_tracks());
         assert!(query.contains(0));
         assert!(app.playback_view.current.is_none());
+    }
+
+    #[test]
+    fn repeat_key_cycles_modes_and_lyrics_follow_playback_position() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = App::new(temporary.path().join("library.muse")).unwrap();
+        assert!(screen(&mut app, 100, 24).contains("sequential"));
+        app.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(app.message.contains("list loop"));
+        assert!(screen(&mut app, 100, 24).contains("list loop"));
+        app.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(screen(&mut app, 100, 24).contains("single loop"));
+        app.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(screen(&mut app, 100, 24).contains("sequential"));
+        let source = temporary.path().join("song.mp3");
+        std::fs::write(
+            &source,
+            include_bytes!("../../muse-library/tests/fixtures/silence.mp3"),
+        )
+        .unwrap();
+        std::fs::write(
+            source.with_extension("lrc"),
+            b"[00:00.00]First line\n[00:10.00]Second line\n",
+        )
+        .unwrap();
+        assert_eq!(app.library.import(&source).imported, 1);
+        app.reload_browser().unwrap();
+        let id = app.tracks[0].id;
+        app.playback_view.current = Some(crate::playback::Current { id, generation: 1 });
+        app.playback_view.status = Some(muse_playback::PlaybackStatus {
+            state: PlaybackState::Playing,
+            position: Duration::from_secs(11),
+            duration: Some(Duration::from_secs(30)),
+        });
+        app.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        let shown = screen(&mut app, 100, 24);
+        assert!(shown.contains("Lyrics"));
+        assert!(shown.contains("Second line"));
+        assert!(shown.contains("›"));
+        app.playback_view.status.as_mut().unwrap().position = Duration::from_secs(1);
+        let earlier = screen(&mut app, 100, 24);
+        assert!(earlier.contains("First line"));
+        assert!(earlier.contains("› [00:00] First line") || earlier.contains("First line"));
+        app.playback_view.current = None;
+        app.lyrics_track = Some(-1);
+        app.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert!(screen(&mut app, 100, 24).contains("Nothing is playing"));
+    }
+
+    #[test]
+    fn user_playlist_can_be_created_from_the_library_and_played_as_a_list() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = App::new(temporary.path().join("library.muse")).unwrap();
+        let first = temporary.path().join("first.mp3");
+        let second = temporary.path().join("second.flac");
+        std::fs::write(
+            &first,
+            include_bytes!("../../muse-library/tests/fixtures/silence.mp3"),
+        )
+        .unwrap();
+        std::fs::write(
+            &second,
+            include_bytes!("../../muse-library/tests/fixtures/tone.flac"),
+        )
+        .unwrap();
+        assert_eq!(app.library.import(&first).imported, 1);
+        assert_eq!(app.library.import(&second).imported, 1);
+        app.reload_browser().unwrap();
+        assert_eq!(app.tracks.len(), 2);
+        assert!(screen(&mut app, 120, 24).contains("全部本地"));
+        app.execute_command("playlist new Night Drive");
+        assert!(app.message.contains("Night Drive"));
+        let second_id = app.tracks[1].id;
+        app.selection.select(Some(1));
+        app.execute_command("playlist add Night Drive");
+        app.selection.select(Some(0));
+        app.execute_command("playlist add Night Drive");
+        app.execute_command("playlist use Night Drive");
+        assert_eq!(app.tracks.len(), 2);
+        assert_eq!(app.tracks[0].id, second_id);
+        assert!(screen(&mut app, 120, 24).contains("Night Drive"));
+        app.execute_command("playlist library");
+        assert!(screen(&mut app, 120, 24).contains("Library"));
+    }
+
+    #[test]
+    fn lyric_timestamps_highlight_the_current_line() {
+        let lines = parse_lrc("[offset:1000]\n[00:01.00][00:05.50]Hold\nplain\n[ti:title]\n");
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].text, "plain");
+        assert!(lines[0].at.is_none());
+        assert_eq!(lines[1].at, Some(Duration::from_millis(2_000)));
+        assert_eq!(lines[2].at, Some(Duration::from_millis(6_500)));
     }
 }
