@@ -41,6 +41,7 @@ test:
 	$(CARGO) test --workspace --locked --doc --all-features
 
 e2e:
+	$(CARGO) build -p muse --locked
 	$(CARGO) test -p muse-e2e --locked --test import $(if $(strip $(E2E_FILTER)),-- --name "$(E2E_FILTER)")
 
 e2e-list:

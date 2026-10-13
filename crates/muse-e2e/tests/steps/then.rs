@@ -181,3 +181,30 @@ fn browsing_groups(world: &mut ImportWorld, expected: usize) -> Result<()> {
     assert_eq!(world.library.groups()?.len(), expected);
     Ok(())
 }
+
+#[then(expr = "the current playlist is {string}")]
+fn current_playlist(world: &mut ImportWorld, name: String) -> Result<()> {
+    assert_eq!(world.status_line("Playlist")?, name, "current playlist");
+    Ok(())
+}
+
+#[then(expr = "the playback mode is {string}")]
+fn playback_mode(world: &mut ImportWorld, mode: String) -> Result<()> {
+    assert_eq!(world.status_line("Mode")?, mode, "playback mode");
+    Ok(())
+}
+
+#[then(expr = "the current track index is {int} of {int}")]
+fn track_index(world: &mut ImportWorld, index: usize, len: usize) -> Result<()> {
+    assert_eq!(
+        world.status_line("Index")?,
+        format!("{index}/{len}"),
+        "playlist index"
+    );
+    Ok(())
+}
+
+#[then("advancing fails")]
+fn advancing_fails(world: &mut ImportWorld) -> Result<()> {
+    world.expect_advance_failed()
+}

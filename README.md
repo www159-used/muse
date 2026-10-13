@@ -169,7 +169,7 @@ MUSE_SAMPLE_ROOT=~/Music/NetEase cargo test -p muse-library --test local_samples
 
 The sample folder must directly contain MP3, FLAC and NCM. CI uses generated repository fixtures rather than personal music.
 
-Import workflows have a separate test-only workspace package. English Gherkin stories cover MP3/FLAC imports, multiple tracks, recursive folders, Unicode paths, mixed downloads, local lyrics/artwork and repeated imports. Given / When / Then step definitions use real isolated source files and SQLite through the public library interface. Cucumber discovers `.feature` files and reports each step. Workspace tests and CI include all scenarios.
+Import and playlist workflows have a separate test-only workspace package. English Gherkin stories cover MP3/FLAC imports, multiple tracks, recursive folders, Unicode paths, mixed downloads, local lyrics/artwork, repeated imports, and phase-1 playlist playback. Given / When / Then step definitions use real isolated source files and SQLite through the public library interface. Playlist stories drive the `muse` CLI against the shared playback service. Cucumber discovers `.feature` files and reports each step. Workspace tests and CI include all scenarios.
 
 ```sh
 make e2e
