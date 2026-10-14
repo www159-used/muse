@@ -3904,7 +3904,7 @@ mod tests {
             .find(|line| line.contains('♪'))
             .unwrap_or_else(|| panic!("no playing marker rendered: {shown}"));
         assert!(
-            playing_row.contains(&format!("{}", app.tracks[1].title)),
+            playing_row.contains(app.tracks[1].title.as_str()),
             "{shown}"
         );
     }
