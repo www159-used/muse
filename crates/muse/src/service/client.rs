@@ -78,6 +78,12 @@ impl Client {
         lock(&self.view).clone()
     }
 
+    /// Adopt a fresher snapshot (e.g. from a synchronous colon transport call)
+    /// so the next `view()` poll does not roll the UI back to a stale state.
+    pub fn apply(&self, view: View) {
+        *lock(&self.view) = view;
+    }
+
     fn send(&self, command: Command) -> Result<(), String> {
         if self.exit.load(Ordering::Acquire) != 0 {
             return Err("terminal client is exiting".into());

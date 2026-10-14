@@ -1032,6 +1032,9 @@ impl App {
         match crate::service::transport(&self.library_path, command) {
             Ok(view) => {
                 self.message = colon_transport_message(command, &view);
+                if let Some(playback) = &self.playback {
+                    playback.apply(view.clone());
+                }
                 self.playback_view = view;
             }
             Err(error) => self.message = error,
@@ -3835,6 +3838,76 @@ mod tests {
         let after = remote.call(crate::service::Command::Status, None).unwrap();
         assert_eq!(after.current.unwrap().id, ids[0]);
         assert_eq!(after.playlist_id, Some(night.id));
+    }
+
+    #[test]
+    fn colon_transport_repaints_the_pane_through_the_attached_client() {
+        let temporary = TempDir::new().unwrap();
+        let path = temporary.path().join("library.muse");
+        let mut library = muse_library::Library::open(&path).unwrap();
+        for (name, bytes) in [
+            (
+                "a.mp3",
+                &include_bytes!("../../muse-library/tests/fixtures/silence.mp3")[..],
+            ),
+            (
+                "b.flac",
+                &include_bytes!("../../muse-library/tests/fixtures/tone.flac")[..],
+            ),
+        ] {
+            let file = temporary.path().join(name);
+            std::fs::write(&file, bytes).unwrap();
+            assert_eq!(library.import(&file).imported, 1);
+        }
+        let ids: Vec<_> = library
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|track| track.id)
+            .collect();
+        drop(library);
+        let _running = serve(path.clone());
+        let mut app = App::new(path.clone()).unwrap();
+        // Mirror run(): the TUI keeps an attached playback client alive.
+        app.playback = Some(
+            PlaybackWorker::start(crate::service::Remote::attach(&path).unwrap()).unwrap(),
+        );
+        app.execute_command(&format!("play {}", ids[0]));
+        assert_eq!(app.playback_view.current.unwrap().id, ids[0]);
+        // Let the client's background poller observe the loaded track.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app
+            .playback
+            .as_ref()
+            .unwrap()
+            .view()
+            .current
+            .map(|current| current.id)
+            != Some(ids[0])
+        {
+            assert!(
+                Instant::now() < deadline,
+                "attached client did not observe the loaded track"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        app.execute_command("next");
+        assert_eq!(app.message, "next");
+        assert_eq!(app.playback_view.current.unwrap().id, ids[1]);
+        // The run loop polls the attached client before the next draw; that
+        // poll must not clobber the fresher transport view with the client's
+        // pre-next snapshot.
+        app.poll_playback();
+        assert_eq!(app.playback_view.current.unwrap().id, ids[1]);
+        let shown = screen(&mut app, 120, 24);
+        let playing_row = shown
+            .lines()
+            .find(|line| line.contains('♪'))
+            .unwrap_or_else(|| panic!("no playing marker rendered: {shown}"));
+        assert!(
+            playing_row.contains(&format!("{}", app.tracks[1].title)),
+            "{shown}"
+        );
     }
 
     #[test]

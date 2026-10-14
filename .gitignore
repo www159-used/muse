@@ -7,3 +7,4 @@ __pycache__/
 *.muse
 *.muse-shm
 *.muse-wal
+library.muse.maintenance.lock
