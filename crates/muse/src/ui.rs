@@ -3869,9 +3869,8 @@ mod tests {
         let _running = serve(path.clone());
         let mut app = App::new(path.clone()).unwrap();
         // Mirror run(): the TUI keeps an attached playback client alive.
-        app.playback = Some(
-            PlaybackWorker::start(crate::service::Remote::attach(&path).unwrap()).unwrap(),
-        );
+        app.playback =
+            Some(PlaybackWorker::start(crate::service::Remote::attach(&path).unwrap()).unwrap());
         app.execute_command(&format!("play {}", ids[0]));
         assert_eq!(app.playback_view.current.unwrap().id, ids[0]);
         // Let the client's background poller observe the loaded track.
