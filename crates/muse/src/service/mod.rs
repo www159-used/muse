@@ -302,6 +302,10 @@ pub(crate) fn run_with(
     result
 }
 
+/// Shared by CLI `pause` / `play` / `prev` and colon transport when no daemon is up.
+pub(crate) const TRANSPORT_NEEDS_SERVICE: &str =
+    "no playback service running; transport commands need a live playback service";
+
 pub(crate) fn control_text(path: &Path, command: Command) -> Result<String, String> {
     let remote = match command {
         Command::Load(_)
@@ -318,6 +322,7 @@ pub(crate) fn control_text(path: &Path, command: Command) -> Result<String, Stri
             Command::Status | Command::Stop | Command::Shutdown => {
                 Ok("No playback service running".into())
             }
+            Command::Play | Command::Pause | Command::Prev => Err(TRANSPORT_NEEDS_SERVICE.into()),
             _ => Err("no playback session; use play <track-id> or open muse".into()),
         };
     };
@@ -416,6 +421,15 @@ fn track_title(path: &Path, id: i64) -> Option<String> {
         .track(id)
         .ok()
         .map(|track| track.title)
+}
+
+/// Colon `:pause`, `:play`, `:play <id>`, `:next`, and `:prev`.
+///
+/// Unlike CLI `play <id>` and CLI `next`, this does not start a daemon. A
+/// missing service is the same error as `pause` / `prev`.
+pub(crate) fn transport(path: &Path, command: Command) -> Result<View, String> {
+    let remote = Remote::find(path)?.ok_or_else(|| TRANSPORT_NEEDS_SERVICE.to_string())?;
+    remote.call(command, None)
 }
 
 pub(crate) fn volume_text(

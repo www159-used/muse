@@ -20,6 +20,7 @@ pub enum Command {
     PlayPlaylist(i64),
     UsePlaylist(i64),
     Next,
+    Prev,
     PlayNextOnce(i64),
     CycleMode,
     SetMode(RepeatMode),
@@ -36,7 +37,10 @@ pub enum Command {
 
 impl Command {
     pub fn loads(&self) -> bool {
-        matches!(self, Self::Load(_) | Self::PlayPlaylist(_) | Self::Next)
+        matches!(
+            self,
+            Self::Load(_) | Self::PlayPlaylist(_) | Self::Next | Self::Prev
+        )
     }
 
     pub fn action(self) -> Option<Action> {
@@ -45,6 +49,7 @@ impl Command {
             Self::PlayPlaylist(id) => Action::PlayPlaylist(id),
             Self::UsePlaylist(id) => Action::UsePlaylist(id),
             Self::Next => Action::Next,
+            Self::Prev => Action::Prev,
             Self::PlayNextOnce(id) => Action::PlayNextOnce(id),
             Self::CycleMode => Action::CycleMode,
             Self::SetMode(mode) => Action::SetMode(mode),

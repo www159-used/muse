@@ -24,6 +24,7 @@ Start with [repeat-import.feature](scenarios/import/repeat-import.feature): impo
 | [Next track](scenarios/playlist/next-track.feature) | Status shows the upcoming track, including a track in the middle of the playlist; only the last sequential track has no next. Play-next-once stays on 全部本地. |
 | [Import feedback](scenarios/import/import-feedback.feature) | A corrupt file is reported, a fixed file imports on retry, and an empty folder adds nothing. |
 | [Application volume](scenarios/playlist/volume.feature) | `volume set`, `inc`, and `dec` change internal gain, clamp, persist across a service restart, and fail when the service is down. |
+| [Previous track](scenarios/playlist/previous-track.feature) | `prev` steps backward, sequential playback fails on the first track, list loop wraps, and `pause` / `play` / `prev` fail when the service is down. |
 
 Every import checks added/duplicate counts, rejects unexpected failures or issues, verifies library audio against independent fixtures and checks that all prepared source files remain unchanged. Track tables describe the complete library and match each row once without depending on import order.
 
@@ -61,6 +62,13 @@ The feature describes user actions and observable outcomes. [Cucumber's step att
 | `When I play the playlist "全部本地"` | [play_playlist](tests/steps/when.rs) asks the shared playback service to start that playlist. |
 | `When I play the track from fixture "tone.flac"` | [play_fixture](tests/steps/when.rs) starts that imported track with `play`. |
 | `When I advance to the next track` | [advance](tests/steps/when.rs) runs `next` and requires it to succeed. |
+| `When I go to the previous track` | [previous](tests/steps/when.rs) runs `prev` and requires it to succeed. |
+| `When I try to go back past the first track` | [try_previous](tests/steps/when.rs) runs `prev` and records whether it failed. |
+| `When I pause playback` / `When I resume playback` | [pause_playback](tests/steps/when.rs) and [resume_playback](tests/steps/when.rs) run `pause` and `play`. |
+| `Then going back fails` | [going_back_fails](tests/steps/then.rs) checks that `prev` was rejected with `start of playlist`. |
+| `Then the playback state is "Paused"` | [playback_state](tests/steps/then.rs) reads the status `State` line. |
+| `Then the status has no previous-track field` | [no_previous_field](tests/steps/then.rs) checks that status has no `Prev:` line. |
+| `Then transport commands fail because playback is not running` | [transport_requires_service](tests/steps/then.rs) checks `pause`, `play`, and `prev` exit non-zero without a service. |
 | `When I try to advance past the last track` | [try_advance](tests/steps/when.rs) runs `next` and records whether it failed. |
 | `When I cycle the playback mode` | [cycle_mode](tests/steps/when.rs) cycles sequential, list loop, and single loop. |
 | `Then the current playlist is "全部本地"` | [current_playlist](tests/steps/then.rs) reads the status playlist line. |

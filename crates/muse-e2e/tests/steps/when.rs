@@ -34,6 +34,26 @@ fn advance(world: &mut ImportWorld) -> Result<()> {
     world.advance()
 }
 
+#[when("I go to the previous track")]
+fn previous(world: &mut ImportWorld) -> Result<()> {
+    world.previous()
+}
+
+#[when("I try to go back past the first track")]
+fn try_previous(world: &mut ImportWorld) -> Result<()> {
+    world.attempt_previous()
+}
+
+#[when("I pause playback")]
+fn pause_playback(world: &mut ImportWorld) -> Result<()> {
+    world.pause()
+}
+
+#[when("I resume playback")]
+fn resume_playback(world: &mut ImportWorld) -> Result<()> {
+    world.resume()
+}
+
 #[when(expr = "I queue the track from fixture {string} to play next once")]
 fn queue_next(world: &mut ImportWorld, fixture: String) -> Result<()> {
     world.queue_fixture_next(&fixture)
