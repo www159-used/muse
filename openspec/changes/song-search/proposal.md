@@ -8,7 +8,7 @@ Large libraries need a way to find songs by their metadata without knowing a lin
 - Search titles, artists and albums using case-insensitive literal text; retain the complete library order and absolute line numbers.
 - Preview matches while editing, confirm with Enter and restore the original selection/view with Esc.
 - Remember confirmed searches for wrapping `n`/`N` navigation, including numeric counts and empty-prompt repetition.
-- Highlight matching rows and show the query and match position/count in English UI labels.
+- Highlight matching rows only during search input; clear match highlighting on confirmation/cancellation and keep ordinary selection styling during repeat jumps. Show the remembered query and match position/count in English UI labels.
 - Keep search input in COMMAND mode, isolated from playback, import commands and mouse navigation; stay safe across Unicode edits, empty libraries and import refreshes.
 
 ## Capabilities

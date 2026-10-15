@@ -1373,7 +1373,9 @@ impl App {
                             )))
                             .style(
                                 if self
-                                    .active_search()
+                                    .search_prompt
+                                    .as_ref()
+                                    .and_then(|prompt| prompt.preview.as_ref())
                                     .is_some_and(|search| search.contains(index))
                                 {
                                     Style::default()
@@ -2581,7 +2583,7 @@ mod tests {
     }
 
     #[test]
-    fn song_search_highlights_matching_rows_and_keeps_absolute_numbers() {
+    fn song_search_highlights_only_during_preview_and_keeps_repeat_navigation() {
         let temporary = TempDir::new().unwrap();
         let mut app = navigation_app(temporary.path().join("library.muse"), 20);
         app.tracks[2].title = "Moon One".into();
@@ -2589,29 +2591,58 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         normal_keys(&mut app, "/moon");
-        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let buffer = terminal.backend().buffer();
-        let row_text = |row| {
-            buffer
-                .content()
-                .chunks(100)
-                .nth(row)
-                .unwrap()
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect::<String>()
-        };
-        assert!(row_text(4).contains("›  3 Moon One"));
         assert_eq!(buffer[(6, 4)].bg, Color::Blue);
-        assert!(row_text(7).contains("6 Track 006"));
         assert_eq!(buffer[(6, 7)].fg, Color::Yellow);
         assert!(buffer[(6, 7)].modifier.contains(Modifier::BOLD));
         assert_ne!(buffer[(6, 6)].fg, Color::Yellow);
+
+        let assert_matches_unhighlighted = |terminal: &Terminal<TestBackend>| {
+            for row in [4, 7] {
+                let cell = &terminal.backend().buffer()[(6, row)];
+                assert_ne!(
+                    cell.fg,
+                    Color::Yellow,
+                    "search highlight remains on row {row}"
+                );
+                assert!(!cell.modifier.contains(Modifier::BOLD));
+            }
+        };
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(app.search_prompt.is_none());
+        assert_eq!(app.selection.selected(), Some(2));
+        assert_eq!(terminal.backend().buffer()[(6, 4)].bg, Color::Blue);
+        assert_eq!(terminal.backend().buffer()[(6, 4)].fg, Color::White);
+        assert_matches_unhighlighted(&terminal);
+        assert!(screen(&mut app, 100, 24).contains("›  3 Moon One"));
+
         normal_keys(&mut app, "j");
         assert!(screen(&mut app, 100, 24).contains("全部本地 | /moon | 0/2 matches"));
-        normal_keys(&mut app, "n");
-        assert!(screen(&mut app, 100, 24).contains("全部本地 | /moon | 2/2 matches"));
+        for (key, selected) in [("n", 5), ("N", 2)] {
+            normal_keys(&mut app, key);
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            assert_eq!(app.selection.selected(), Some(selected));
+            assert_matches_unhighlighted(&terminal);
+        }
+
+        // Starting another preview highlights candidates again; cancelling it
+        // restores the previous selection/query without persistent highlighting.
+        normal_keys(&mut app, "/moon");
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(6, 7)].fg, Color::Yellow);
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_matches_unhighlighted(&terminal);
+        assert_eq!(app.search.as_ref().unwrap().query, "moon");
+
+        // Empty Enter still repeats the remembered search, without highlights.
+        normal_keys(&mut app, "/");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.selection.selected(), Some(5));
+        assert_matches_unhighlighted(&terminal);
         assert_eq!(app.tracks.len(), 20);
     }
 
