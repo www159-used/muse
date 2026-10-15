@@ -1,6 +1,8 @@
 ## Context
 
-The TUI currently binds Left/Right directly to relative `SeekTarget` calls. `command.rs` implements completion locally: name matching only at the end of the first token, special handling for import paths, and replacements that rebuild the input. Ratatui already renders a candidate popup, and the standalone REPL shares the editor but keeps a separate command vocabulary. Colon commands are parsed separately by `BuiltinCommand`; several transport commands use a synchronous service call. The service client already queues seek requests with the expected current playback identity, and the native backend supports absolute and execution-time relative seeks.
+At the start of this change, the TUI binds Left/Right directly to relative `SeekTarget` calls. `command.rs` implements completion locally: name matching only at the end of the first token, special handling for import paths, and replacements that rebuild the input. Ratatui already renders a candidate popup, and the standalone REPL shares the editor but keeps a separate command vocabulary. Colon commands are parsed separately by `BuiltinCommand`; several transport commands use a synchronous service call. The service client already queues seek requests with the expected current playback identity, and the native backend supports absolute and execution-time relative seeks.
+
+Partial implementation includes the Rhai worker and explicit `=` script entry; ordinary commands still use the existing dispatch path pending phase 4. The target retains Vim-style entry while moving registered commands to Rhai callbacks. Completed runtime/catalog work remains useful. The existing REPL keeps a local history vector and handles Up/Down, but returning past the newest entry clears the buffer instead of restoring a draft. TUI command input has no history navigation. Both frontends already share the basic `CommandLine` buffer.
 
 Lyrics select the last timestamp at or before the reported playback position. Manual lyric scrolling suspends centering for three seconds. A new seek does not require a different lyric clock or parser.
 
@@ -9,7 +11,9 @@ The user also wants to practice passages to memorize melody and lyrics and expli
 ## Goals / Non-Goals
 
 **Goals:**
+- Unify TUI and interactive REPL command execution under Rhai while retaining ordinary command names, aliases, and numeric navigation.
 - Make Rhai calls, deferred playback bindings, and pointer seeking share registered application operations and completion feedback.
+- Support readline-style editing, recoverable command history, and explicit dot repeat without interfering with ordinary browsing or playback.
 - Reuse API definitions for execution, function signatures, namespace symbols, parameter suggestions, and path completion.
 - Show one progress row in library and lyric views, without another keyboard focus mode.
 - Keep input responsive while the service seeks, and render the actual reported position after completion.
@@ -17,8 +21,8 @@ The user also wants to practice passages to memorize melody and lyrics and expli
 
 **Non-Goals:**
 - General migration of all navigation and playback keys to a configurable command system.
-- Persistent user keymap/configuration files, command prefill, a full language server, or CLI/REPL language migration. Session-local function bindings are included.
-- Custom duration literals, time-string parsing, or a new command language parser alongside Rhai.
+- Persistent user keymap/configuration files or command history, command prefill, a full language server, full GNU Readline parity, or changes to one-shot CLI argument syntax. Session-local function bindings, history, and a focused readline-style editing subset are included.
+- Custom duration literals, time-string parsing, expression evaluation in ordinary command arguments, and full Vim Ex syntax (ranges, substitution, pipelines, or inferred abbreviations). A thin registered-command tokenizer is included.
 - Continuous audible scrubbing, a new playback clock, lyric format changes, or audio backend replacement.
 - Audio export, saved ranges, lyric-line selection, playback speed controls, inserted silences, repeat counts, and sample-exact or gapless looping.
 
@@ -28,7 +32,7 @@ The user also wants to practice passages to memorize melody and lyrics and expli
 
 Status: scripting and function bindings are the user's direction; runtime architecture is proposed.
 
-Use standard Rhai syntax in the colon prompt. Do not add a `:rhai` prefix or custom `10s` literals. Register native application functions once, with names, parameter/return metadata, descriptions, and any semantic completion annotations. Keep script execution outside the render/event loop and outside audio callbacks. A dedicated serialized script worker owns its engine, scope, compiled functions, and retained callbacks; bounded input queues and Rhai execution limits keep the UI responsive. Native calls also need bounded waits/cancellation because a script operation budget does not interrupt a blocking host function.
+Use standard Rhai syntax after the short `=` marker: `:=seek(90, unit::SEC)` in the TUI and `=seek(90, unit::SEC)` in the REPL. The marker accepts complete scripts, including statements and function definitions, not only expressions. Ordinary commands invoke retained callbacks through the same runtime rather than another business dispatcher. Both frontends share registration data and runtime implementation, with session-local scope and frontend capabilities. The `:=` spelling is a proposed response to the user finding `:rhai` too long; a long-form alias is not required. Do not add custom `10s` literals. Register native application functions once, with names, parameter/return metadata, descriptions, and any semantic completion annotations. Keep script execution outside the render/event loop and outside audio callbacks. A dedicated serialized script worker owns its engine, scope, compiled functions, and retained callbacks; bounded input queues and Rhai execution limits keep the UI responsive. Native calls also need bounded waits/cancellation because a script operation budget does not interrupt a blocking host function.
 
 Playback host calls submit structured operations and await their own completion on that worker. Calls in `practice(...); play();` therefore execute in order; a failed first call aborts the remaining statements unless explicitly handled by the script. Previously completed effects are not rolled back. Runtime error handling must not retry a script. UI callbacks and completion consume snapshots/messages rather than calling back into a locked engine. Stop/quit retain a responsive control path even when a script is busy. Expected playback identity accompanies each relevant operation.
 
@@ -128,46 +132,105 @@ Retain `FnPtr`, its compilation environment/AST, and captured values. Prompt/sea
 
 ### 9. Contextual completion in the existing editor
 
-Status: proposed integration based on inspection of `command.rs` and `ui.rs`.
+Status: proposed integration based on the shared editor and explicit command/script entry modes.
 
-Keep `CommandLine` editing and the Ratatui popup. Introduce a completion provider accepting text, UTF-8 byte cursor, syntax mode, and an immutable symbol/catalog snapshot. Return candidates with label, insertion text, exact replacement range, kind, detail/signature, and resulting cursor. Replace only the active token/argument range and preserve surrounding expressions, delimiters, and Unicode text. Cycling must use a stable original edit range/session instead of repeatedly reconstructing the full line.
+Keep `CommandLine` editing and the Ratatui popup. Use one completion interface accepting text, UTF-8 byte cursor, frontend capabilities, and an immutable registry/catalog snapshot. Determine mode from the same entry router used for submission. Ordinary input completes registered command names, explicit aliases, subcommands, and schema-declared arguments. Only a leading `=` selects Rhai completion; do not infer mode from parentheses, valid syntax, or failed evaluation. Empty input lists commands and the `=` script entry. Ordinary command-name insertion does not add parentheses.
 
-Build the catalog from the same API registration data used by Rhai, using its `metadata` feature for functions, namespaces, and script-defined function signatures. Parameter names/documentation need explicit registration or plugin metadata; ordinary function registration alone does not provide all of them. Register exported constant names/values and semantic roles such as `unit`, `path`, `context`, and `key` alongside their APIs: function metadata alone does not enumerate these choices. Keep one registration owner and verify catalog/runtime parity; do not maintain another hard-coded command-name list. Group numeric overloads under one user-facing signature, while keeping their actual registration accurate.
+Build both views from shared registration records. A command descriptor contains its name, aliases, argument schema, documentation, required capabilities, and callback reference; API registration supplies Rhai signatures, namespaces, constants, and parameter roles. Rhai metadata does not automatically provide command aliases or all semantic roles, so declare those explicitly alongside registrations. Do not maintain independent execution and completion name lists. Group numeric overloads for readable signatures and publish successful user command/function registration updates without executing callbacks during completion.
 
-Use a tolerant lexical/context pass for incomplete input, tracking strings/escapes, comments, parentheses, brackets, braces, and argument separators. It need not evaluate or fully compile an unfinished expression such as `seek(90, unit::`. Count commas at the active call depth, not inside nested calls or strings. Recognize identifiers/namespaces and known direct call signatures. If context or argument types are uncertain, offer conservative name suggestions or no result rather than executing code to infer a value. Full type inference, arbitrary object-member inference, and incomplete local-scope analysis are deferred; already registered script functions and published session symbols can participate without running them.
+Inside the script body, use a tolerant context scanner for identifiers, namespaces, nested delimiters, strings/escapes, comments, and active argument position. Count only commas at the active call depth. Incomplete code need not compile. Unsupported contexts receive conservative suggestions or none; full type inference and an LSP remain deferred. Completion must translate body-relative ranges back to full editor byte offsets, preserving the leading `=`, surrounding whitespace, suffix, and Unicode boundaries.
 
-| Cursor context (`▏` marks the cursor) | Candidates/help |
+| TUI input (`▏` marks the cursor) | Candidates/help |
 | --- | --- |
-| `se▏` | `seek`, `seek_by` with signatures |
-| `unit::▏` | Exported unit values |
-| `seek(90, ▏` | Qualified unit values plus active-parameter hint |
-| `seek_by(-10, unit::▏` | Time units only |
-| `practice(80, 95, unit::S▏)` | Replace `S` with `SEC`, retaining `)` |
-| `import_audio("~/Mu▏"); pause();` | Path candidates for the annotated argument; preserve the closing string/call and following statement |
-| A comment or an ordinary string argument | No code-symbol suggestions |
+| `:pl▏` | Registered `play` / `playlist` command entries; no parentheses |
+| `:s▏` | `s` only if explicitly registered, plus other matching registered names |
+| `:=se▏` | `seek`, `seek_by` with signatures |
+| `:=unit::▏` | Exported unit values |
+| `:=seek(90, ▏` | Qualified units and active-parameter hint |
+| `:=seek_by(-10, unit::▏` | Time units only |
+| `:=practice(80, 95, unit::S▏)` | Replace only `S` with `SEC` |
+| `:import "~/Mu▏` | Paths escaped for ordinary command quoting |
+| `:=import_audio("~/Mu▏"); pause();` | Paths escaped as Rhai strings, preserving the rest of the script |
 
-When a unique function name is completed, insert parentheses only if absent and place the cursor inside them; reuse existing delimiters. Empty prompts list callable application functions/namespaces and labeled legacy entry points. At an uncommitted first-token prefix, show the union of compatible function/legacy candidates; selecting or typing a complete form determines the provider mode. First Tab expands the common prefix and opens candidates when ambiguous; subsequent Tab/Shift-Tab cycles. Candidate edits never execute code; Enter explicitly submits the resulting input, and Esc cancels the command prompt as before. Show signature help while inside a recognized call and highlight the active parameter; numeric arguments receive hints rather than invented numeric candidates. Editing/cursor movement invalidates the completion session. Tiny terminals omit hints/popups without corrupting input or layout.
+Candidates carry display/insertion text, exact replacement range, resulting cursor, kind, and signature/help. First Tab expands a common prefix and shows ambiguous candidates; later Tab/Shift-Tab cycles using the original completion session. Only script function completion inserts missing parentheses and reuses existing delimiters. Enter submits explicitly; Esc cancels without execution. Editing, moving the cursor, or changing/removing the script marker invalidates completion. Small terminals may omit hints/popups without corrupting input.
 
-Reuse existing path scanning/filtering and `~/` expansion, adapting escaping to Rhai double-quoted strings rather than shell quoting. Completion must work before a closing quote is typed and preserve the rest of the call. Only a path-annotated parameter may trigger filesystem completion; symbol and unit completion must not access the filesystem. Completion never evaluates scripts, callbacks, or host getters. Snapshot catalog updates after a successful registration/definition without blocking rendering.
+Reuse path discovery/filtering and `~/` expansion only for registered path arguments. Ordinary commands use the common command tokenizer's quote/escape rules, while script strings use Rhai escaping. Neither mode may evaluate strings, callbacks, or getters to infer candidates; symbols and units never scan the filesystem. `rustyline`/`reedline` would still need this semantic provider, so retain the current editor and terminal ownership.
 
-Rhai metadata supplies symbols, not a complete editor or language server. `rustyline` and `reedline` offer line editing and completion interfaces but would still need semantic providers and TUI integration. Reusing the current editor avoids replacing terminal ownership just to add this provider.
+### 10. Thin command entry backed by Rhai
 
-### 10. Existing commands and migration boundary
+Status: retaining Vim-style entry and unified execution follows the latest discussion. The short script marker and user-command API below are proposed implementation choices.
 
-Status: proposed compatibility decision.
+Route trimmed interactive input deterministically before execution:
 
-Provide Rhai adapters for the existing application operations, including playback, quit/detach, import, playlist management, volume, and numeric navigation. Reuse current Rust operation handlers so confirmations, import jobs, errors, and exit semantics are preserved. Use valid Rhai identifiers (`import_audio`, not reserved `import`; `practice`, not reserved `loop`). API names/signatures and their completion metadata are defined together during registration.
+1. Empty input is a no-op.
+2. Leading `=` selects a script: strip only that marker, retain the body/source offsets, and submit the remaining source to the Rhai worker. A bare marker is empty script input and has no effect.
+3. An entire ASCII decimal integer is a navigation command invoking the same `goto_line` API through the runtime. Require a positive representable row number; zero/overflow produce an English argument error, and valid rows use the existing navigation bounds behavior. In the REPL, navigation reports unavailable context.
+4. Otherwise resolve an exact registered command name/alias and declared subcommands, tokenize its arguments, and invoke its retained Rhai callback with typed values.
 
-Keep the currently shipped colon forms through explicit compatibility recognition before evaluation, including numeric navigation and bare legacy commands. Recognition is limited to existing registered forms; it must distinguish a legacy token from a Rhai call such as `play()`. Once input is classified as Rhai, a parse/runtime error never retries it through another dispatcher. Legacy completion keeps its current rules and path quoting; Rhai completion uses the provider above. New seek/practice features have only function syntax, so no additional text mini-grammar is created. Standalone CLI/REPL keep their existing language and provider mode in this change, with no Rhai-only candidates advertised there.
+Unknown commands and invalid arguments report command errors. `:play()` is not implicitly a script; the error can suggest `:play` or `:=play()`. Script errors never retry input as commands. Explicit aliases such as `q` remain registry entries, not inferred prefixes. A short name such as `s` has no predefined meaning unless registered; this change does not implement Vim substitution or its broader Ex language.
+
+Register Rhai APIs for every current TUI/REPL operation, including playback, quit/detach, import, playlist, volume, queries, maintenance, help, and navigation. Retain useful existing command forms as first-class command descriptors whose callbacks call those APIs. A command descriptor declares argument count, primitive conversion, optional/default values, supported flags/subcommands, and completion roles. Use one ordinary tokenizer with whitespace separation, quoted arguments, and documented escaping; do not evaluate argument expressions or create duration/percentage grammars. Pass values directly to the callback rather than interpolating input into Rhai source or reconstructing argv for the old dispatcher. Reuse typed Rust operations beneath the API so behavior is implemented once.
+
+| Ordinary entry | Equivalent script entry |
+| --- | --- |
+| `:play`, `:pause`, `:stop` | `:=play()`, `:=pause()`, `:=stop()` |
+| `:q` / `:quit`, `:detach` | `:=quit()`, `:=detach()` |
+| `:import "path"` | `:=import_audio("path")` |
+| `:23` | `:=goto_line(23)` |
+| Playlist subcommands | Calls in `playlist::` |
+| Volume subcommands | `volume::get/set/inc/dec` calls |
+| REPL queries, modes, next-once, maintenance | Registered query/control functions and `library::` calls |
+
+Do not automatically expose every script API as a positional command. New seek/practice argument expressions use `:=seek(...)` / `:=practice(...)` or callbacks bound to convenient commands/keys. This keeps numeric/unit semantics in one API and avoids another seek grammar.
+
+Provide session-local `command(name, callback)` and `uncommand(name)` as the proposed minimal user-command API. Initially user commands take no command-line arguments; closures capture configuration or call script functions. Names follow `[A-Za-z][A-Za-z0-9_]*`. Registration does not run a callback, replaces only an existing user entry of the same name, and rejects collisions with builtin names/aliases. Removal affects only user entries. Numeric entry and `=` are reserved by routing. Retain callback ASTs/captures as for key bindings. Parameterized user-command schemas and persistent configuration loading are future extensions; builtin command schemas cover current operations.
+
+For example, `:=command("s", || seek_by(10, unit::SEC))` makes `:s` a session-local forward-seek command; this is an example, not a default meaning for `s`. The same callback can be bound to a key. Dispatch callbacks directly on the serialized worker, with the same ordering, operation budget, and bounded waits as scripts; do not recursively submit a script and wait on the same worker. Direct emergency stop/quit controls retain their independent path to the shared operations when a worker is busy.
+
+The TUI colon opens the editor and is not part of its source. REPL input uses the same routing without that UI colon. UI-only APIs/commands declare capabilities, are omitted from unsupported completion, and return clear context errors if called. Chooser answers and normal-mode numeric prefixes remain separate UI interactions. One-shot process arguments such as `muse play` keep their existing CLI boundary and call shared typed operations. Generate interactive help from command/API registrations and keep CLI help specific to argv.
+
+
+### 11. Readline-style editing, history, and dot repeat
+
+Status: editing/history/repeat are user-requested. The following behavior is the proposed first-version contract; readline denotes the interaction style, not a mandatory dependency on GNU Readline or a replacement terminal event loop.
+
+Keep editing actions separate from command routing and Rhai execution. Extend the shared `CommandLine` buffer with cursor movement, deletion/kill, yank, and history replacement. The TUI and REPL map keys to the same editor actions; Crossterm/Ratatui retain terminal ownership. A future library adapter can implement these actions if useful without changing completion or execution semantics. This change does not require selecting or adding an editor library.
+
+| Key inside command input | Action |
+| --- | --- |
+| Left/Right, Ctrl-B/F | Move one Unicode character |
+| Home/End, Ctrl-A/E | Move to beginning/end |
+| Alt-B/F | Move backward/forward by whitespace-delimited word |
+| Backspace/Delete | Delete previous/next character |
+| Ctrl-U/K | Kill from cursor to beginning/end |
+| Ctrl-W | Kill preceding whitespace and preceding word |
+| Ctrl-Y | Insert the last killed text at the cursor |
+| Up/Down, Ctrl-P/N | Older/newer submitted command |
+| Tab/Shift-Tab | Existing completion cycle |
+| Enter / Esc | Submit / cancel as before |
+
+Use UTF-8-safe character boundaries, including for non-ASCII text. A nonempty kill replaces one session-local yank slot; a kill at an empty boundary preserves it. A full kill ring, incremental reverse search, vi editing mode inside the prompt, and multiline editing are deferred. Editing and history movement invalidate completion and recompute ordinary/script mode from the resulting text. These key meanings apply only inside command input; existing search, chooser, normal-mode controls, emergency Ctrl-C, and REPL empty-line Ctrl-D behavior retain precedence.
+
+Share history behavior between frontends, but keep each frontend session's history local. Store at most 200 nonempty submissions in insertion order, preserving exact editable text including the `=` marker (not the TUI's displayed colon). Record failed submissions too, so they can be corrected. Deduplicate adjacent identical submissions only; evict oldest entries at capacity. Cancelled/empty input, chooser answers, search terms, ordinary key callbacks, and dot replay add no entries. Persistence across process exit is deferred.
+
+On the first Up from the newest position, save the current draft and cursor, then show the newest history item with its cursor at the end. Further Up/Down traverses older/newer entries without wraparound; Down past the newest restores the saved draft and cursor. An empty history leaves the buffer unchanged. Editing a recalled entry never changes stored history; navigating again replaces the working buffer, and Down to the draft still restores the original draft. Enter submits the edited text as a new command, while Esc ends browsing without changing history. History navigation never executes anything. Up/Down always navigate history inside command input, even with a completion popup; Tab/Shift-Tab remain candidate navigation.
+
+Define dot repeat as repeating the latest successfully completed command submitted manually from the TUI prompt, including an ordinary command, numeric navigation, or `=` script. It is not a replay of the last physical key, pointer gesture, or a Vim edit transaction. Save exact source with its mode marker and a monotonically increasing submission id; publish it as the repeat target only after correlated successful completion, including any chooser/import workflow. Queue acceptance is not success. Failed, cancelled, empty, or stale results do not overwrite the target, and an older success cannot overwrite a newer successful submission. History and repeat state are separate: failed source remains recallable but is not the repeat target.
+
+A plain `.` keypress in ordinary TUI browsing (library/details/lyrics) submits one fresh execution of that saved source through the same router/runtime. Display what is being repeated. Resolve variables, user-command registrations, selection, relative positions, and expected playback identity anew at execution; do not cache host effects or old service requests. For example, after `:=seek_by(10, unit::SEC)`, each deliberate `.` moves ten seconds from the current position. Repeating a script repeats all its statements; there is no special handling for variable/function definitions or a guarantee of the original result. If repeat fails, report the error and do not retry automatically. Repeat itself never replaces its source record or appends a history entry.
+
+If no successful record exists, show an English notice without effects. While a manually submitted command or a dot replay is still pending, reject another dot invocation as busy rather than replaying an older command or creating an unbounded queue. Treat only initial keypress events as dot requests; ignore terminal autorepeat events. Numeric counts do not multiply dot execution in this version. Command/search input and choosers retain precedence, so a dot there is handled as input rather than replay. The REPL has history/editing but no normal-mode dot shortcut in this baseline; its input buffer always accepts `.` as text. These repeat controls are frontend behavior and do not introduce a new ordinary command grammar.
 
 References: [Rhai metadata](https://rhai.rs/book/engine/metadata/export_to_json.html), [signature metadata limits](https://rhai.rs/book/engine/metadata/gen_fn_sig.html), [retaining callable functions](https://rhai.rs/book/language/fn-ptr.html), [custom host types](https://rhai.rs/book/rust/custom-types.html).
 
 ## Risks / Trade-offs
 
+- Command history and execution results arrive at different times → keep history separate from success-based repeat state and correlate results by submission id.
+- A replayed script may resolve different variables, selections, or registrations → rerun source explicitly, show it to the user, and document current-context behavior.
 - Runtime metadata and completion can drift → declare them with the same API registration and verify function/constant parity.
 - Incomplete scripts cannot reliably form a full AST → use conservative cursor-context analysis and test nested calls, quoted commas, comments, and Unicode edits.
 - Native effects and script callbacks can block or outlive their source → retain compilation environments and bound/cancel operations on a dedicated script worker.
-- Terminal-cell precision limits mouse placement → provide exact `:seek` targets and label the preview time.
+- Terminal-cell precision limits mouse placement → provide exact `seek(value, unit)` targets and label the preview time.
 - Playback can change during a gesture or queued operation → cancel stale gestures and preserve expected playback identity through execution and completion.
 - Holding an arrow key can fill the request queue → keep requests bounded and make failure visible; never convert relative requests using stale UI time.
 - Bar layout reduces vertical content space → use one row and existing metadata; test short and narrow terminals.
@@ -177,14 +240,15 @@ References: [Rhai metadata](https://rhai.rs/book/engine/metadata/export_to_json.
 
 ## Migration Plan
 
-Add the Rhai runtime/API catalog, explicit units, ordered host operations, and default bindings. Retain shipped colon behavior through explicit adapters while completing the script editor/provider. Then implement the progress bar and practice service state/scheduling against those APIs. Bump the service protocol for range state and percentage operations with existing explicit mismatch handling; never silently restart a playing older service. Validate default-feature-free native interfaces and keep scripting dependencies confined to the application crate. No library migration or native API expansion is planned. Reverting restores the previous command UI and requires a compatible service restart, without altering stored music.
+Add the Rhai runtime/API catalog, explicit units, ordered host operations, and default bindings. Replace heuristic classification with explicit `=` script routing. Register existing commands and aliases as Rhai callbacks in both frontends, then remove duplicate business dispatchers. Preserve completed runtime/catalog and explicit-routing work; phase 4 completes callback-backed command execution. Complete mode-aware completion, shared editor/history actions, and success-correlated dot replay, then update help/history examples; do not auto-detect or rewrite historical unprefixed scripts. Then implement the progress bar and practice service state/scheduling against those APIs. Bump the service protocol for range state and percentage operations with existing explicit mismatch handling; never silently restart a playing older service. Validate default-feature-free native interfaces and keep scripting dependencies confined to the application crate. No library migration or native API expansion is planned. Reverting restores the previous command UI and requires a compatible service restart, without altering stored music.
 
 ## Open Questions
 
 Optional extensions outside this implementation baseline:
 
 - Where should persistent user configuration scripts live, and what should reload/override behavior be? The same evaluator and `bind` API are intended for them.
-- When should legacy colon forms be deprecated, and should the standalone REPL adopt Rhai too?
+- Should user commands later accept declarative argument schemas or allow explicit builtin overrides?
+- Should history later persist across sessions or support incremental reverse search, and should dot repeat support counts or REPL-specific invocation?
 - Should command prefill have a separate binding action?
 - Should later completion include full local-variable/type analysis or an LSP for external configuration editors?
 - Should practice add lyric-line selection, finer endpoint controls, saved passages, speed changes, or optional gaps?
