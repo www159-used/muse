@@ -14,8 +14,12 @@
 //! later one while a statement never runs twice.
 
 use rhai::{AST, Dynamic, Engine, Scope};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
+use super::host::Host;
 use crate::scripting::api::{self, Unit};
 
 /// How many Rhai operations one submission may perform before it is stopped.
@@ -44,22 +48,37 @@ pub struct Session {
     scope: Scope<'static>,
     definitions: AST,
     output: Arc<Mutex<String>>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl Session {
     /// Create a session with every application API registered.
     pub fn new() -> Self {
+        Self::with_host(Host::default())
+    }
+
+    pub fn with_host(host: Host) -> Self {
+        Self::with_host_and_cancel(host, Arc::new(AtomicBool::new(false)))
+    }
+
+    pub fn with_host_and_cancel(host: Host, cancelled: Arc<AtomicBool>) -> Self {
         let mut engine = Engine::new();
         // A runaway script must not be able to hang the worker forever; the UI
         // stays responsive because it never evaluates scripts itself.
         engine.set_max_operations(MAX_OPERATIONS);
         engine.set_max_call_levels(MAX_CALL_LEVELS);
+        let progress_cancelled = cancelled.clone();
+        engine.on_progress(move |_| {
+            progress_cancelled
+                .load(Ordering::Acquire)
+                .then(|| Dynamic::from("Script cancelled"))
+        });
         let output = Arc::new(Mutex::new(String::new()));
         let printed = Arc::clone(&output);
         engine.on_print(move |line| append_output(&printed, line));
         let debugged = Arc::clone(&output);
         engine.on_debug(move |line, _, _| append_output(&debugged, line));
-        let catalog = api::install(&mut engine);
+        let catalog = api::install_with_host(&mut engine, &host);
         debug_assert_eq!(
             api::verify_parity(&engine, &catalog),
             Ok(()),
@@ -70,6 +89,7 @@ impl Session {
             scope: Scope::new(),
             definitions: AST::empty(),
             output,
+            cancelled,
         }
     }
 
@@ -107,6 +127,9 @@ impl Session {
         let result = match evaluated {
             Ok(value) if value.is::<()>() => Evaluation::Value(String::new()),
             Ok(value) => Evaluation::Value(display_value(&value)),
+            Err(_) if self.cancelled.load(Ordering::Acquire) => {
+                Evaluation::Error("Script error: Script cancelled".into())
+            }
             Err(error) => Evaluation::Error(error_message(&error)),
         };
         let output = self.take_output();
@@ -182,6 +205,27 @@ mod tests {
         assert!(result.contains("hello"));
         assert!(result.contains("42"));
         assert_eq!(value(session.evaluate("1 + 1")), "2");
+    }
+
+    #[test]
+    fn cancellation_stops_a_running_script() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let signal = cancelled.clone();
+        let mut session = Session::with_host_and_cancel(Host::default(), cancelled);
+        signal.store(true, Ordering::Release);
+        let result = session.evaluate("while true {}");
+        assert!(
+            matches!(&result, Evaluation::Error(error) if error.contains("Script cancelled")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn host_calls_without_a_service_report_an_error() {
+        let mut session = session();
+        assert!(
+            matches!(session.evaluate("play()"), Evaluation::Error(error) if error.contains("playback service is unavailable"))
+        );
     }
 
     fn value(evaluation: Evaluation) -> String {
