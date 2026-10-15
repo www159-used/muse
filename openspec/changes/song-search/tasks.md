@@ -11,8 +11,15 @@
 ## Verification
 
 - The initial search tracer failed with `/moon` leaving selection at row 1. It now previews an off-screen artist match, confirms without playing and repeats through artist, album and title matches with n/N/counts.
-- Eight UI/rendering workflows cover preview, cancellation restoring camera/panel focus and the prior query, forward/backward wrapping, empty prompts, oversized counts, single/empty libraries, literal Unicode text and cursor edits, missing metadata placeholders, key/completion/wheel isolation, persistent highlights and narrow/tiny views.
+- Eight UI/rendering workflows cover preview, cancellation restoring camera/panel focus and the prior query, forward/backward wrapping, empty prompts, oversized counts, single/empty libraries, literal Unicode text and cursor edits, missing metadata placeholders, key/completion/wheel isolation, preview-only highlights and narrow/tiny views.
 - The import workflow uses real generated audio, SQLite connections and the production NCM background worker. It verifies newly added matches for both pending and confirmed queries and cancellation by original track ID after an earlier row is removed.
 - The real pseudo-terminal search test verifies COMMAND/NORMAL transitions, metadata matches and n revealing the next off-screen match without starting playback. The existing wheel, connected-command and terminal-hangup tests also pass.
 - `make ci` passed formatting, the standard-library playback interface check, Clippy with denied warnings, 84 ordinary Rust tests, eight import scenarios with 65 steps, two documentation tests and the release build. Three existing physical-device/personal-source tests remain ignored.
 - `openspec validate --all --strict` passed all thirteen changes. Tests use temporary libraries and generated repository fixtures; no personal music or library was used.
+
+## Search highlight interaction revision
+
+- Search highlighting is now limited to an active search prompt. Confirming/cancelling clears it while retaining the appropriate query for repeat navigation.
+- The rendering regression failed against the previous behavior, then passed after restricting row highlighting to the prompt preview. It covers Enter, Esc, n/N, empty-prompt repeat, and reopening a preview on the same terminal buffer.
+- `cargo test -p muse --locked --bin muse song_search -- --nocapture`: all 8 search tests passed.
+- `cargo fmt --all -- --check`, `git diff --check`, and `openspec validate song-search --strict` passed. The earlier full-CI results above describe the original search implementation; this revision used focused checks.

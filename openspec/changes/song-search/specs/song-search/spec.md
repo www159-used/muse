@@ -34,7 +34,19 @@ In NORMAL mode, `n` SHALL select the next match in the last confirmed search dir
 
 ### Requirement: Search feedback and input isolation
 
-The library SHALL show the active query and current match/total count and highlight matching rows, including after confirmation. Search input SHALL support Unicode-safe cursor editing without acting as NORMAL navigation, command completion or playback controls. Wheel input SHALL not change selection during search editing. After an asynchronous import refresh, matches SHALL be rebuilt against the new list and cancellation SHALL restore the original track by identity when available. Rendering and input SHALL remain safe in empty, narrow and tiny views.
+The library SHALL show the active or remembered query and current match/total count. Matching rows SHALL receive search highlighting only while search input is open. Enter SHALL clear search highlighting after confirming the target; Esc SHALL clear preview highlighting while restoring the original view. The confirmed query SHALL remain available for n/N and empty-prompt repetition, and these jumps SHALL use only the ordinary selected-row style without restoring search highlighting. Search input SHALL support Unicode-safe cursor editing without acting as NORMAL navigation, command completion or playback controls. Wheel input SHALL not change selection during search editing. After an asynchronous import refresh, matches SHALL be rebuilt against the new list and cancellation SHALL restore the original track by identity when available. Rendering and input SHALL remain safe in empty, narrow and tiny views.
+
+#### Scenario: Clear highlights after confirming a target
+- **WHEN** a user previews multiple matches and presses Enter
+- **THEN** all search highlighting is removed, the target retains ordinary selection styling, and the query remains available for repeat navigation
+
+#### Scenario: Repeat without persistent highlights
+- **WHEN** a confirmed search is repeated with n, N, or an empty search prompt followed by Enter
+- **THEN** the next target is selected without highlighting every matching row
+
+#### Scenario: Start and cancel another preview
+- **WHEN** a user starts another nonempty search and then presses Esc
+- **THEN** matching rows are highlighted during that preview only, and cancellation restores the origin and prior query without leaving search highlighting
 
 #### Scenario: Edit search text with navigation characters
 - **WHEN** the user types digits, n, spaces or colon in a search prompt and presses Tab or wheel input
