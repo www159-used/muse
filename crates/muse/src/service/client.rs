@@ -305,16 +305,16 @@ mod tests {
     #[test]
     fn unavailable_completion_returns_a_bounded_unconfirmed_error() {
         let (client, received) = fake_client();
-        let _held_request = thread::spawn(move || {
-            let request = received.recv().unwrap();
-            thread::sleep(Duration::from_millis(50));
-            drop(request);
+        let caller = thread::spawn(move || {
+            let start = Instant::now();
+            let error = client
+                .call_with_timeout(Command::Pause, Duration::from_millis(10))
+                .unwrap_err();
+            (error, start.elapsed())
         });
-        let start = Instant::now();
-        let error = client
-            .call_with_timeout(Command::Pause, Duration::from_millis(10))
-            .unwrap_err();
+        let _held_request = received.recv().unwrap();
+        let (error, elapsed) = caller.join().unwrap();
         assert!(error.contains("outcome unconfirmed"), "{error}");
-        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(elapsed < Duration::from_secs(1));
     }
 }
