@@ -6,6 +6,7 @@ mod operations;
 mod playback;
 mod refresh;
 mod repl;
+mod scripting;
 mod search;
 mod service;
 mod ui;
