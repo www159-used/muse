@@ -3,7 +3,7 @@
 //! Read-only completion for the application APIs already registered with Rhai.
 //! This provider uses descriptors, never an engine or filesystem queries.
 
-use super::api::{CONSTANTS, FUNCTIONS};
+use crate::scripting::api::{CONSTANTS, FUNCTIONS};
 
 pub struct Suggestion {
     pub label: String,

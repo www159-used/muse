@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+mod completion;
+
 use std::{
     fs, io,
     path::{MAIN_SEPARATOR, Path, PathBuf},
@@ -133,7 +135,7 @@ struct Completion {
 enum CompletionTarget {
     Commands { prefix: String },
     Paths(PathArgument),
-    Script(crate::scripting::completion::Edit),
+    Script(completion::Edit),
 }
 
 struct PathArgument {
@@ -259,9 +261,7 @@ impl CommandLine {
             if self.repl {
                 return Ok(());
             }
-            let Some((edit, suggestions)) =
-                crate::scripting::completion::candidates(&self.text, self.cursor)
-            else {
+            let Some((edit, suggestions)) = completion::candidates(&self.text, self.cursor) else {
                 return Ok(());
             };
             let candidates = suggestions
