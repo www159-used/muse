@@ -58,6 +58,58 @@ impl BuiltinCommand {
     }
 }
 
+/// Marker that selects Rhai script input in a command prompt.
+///
+/// The TUI shows it as `:=` and the standalone REPL as `=`; routing itself only
+/// looks for the leading `=`.
+pub const SCRIPT_MARKER: char = '=';
+
+/// How the command prompt dispatches submitted input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandForm {
+    /// An ordinary shipped command form, including its arguments and numeric
+    /// navigation.
+    Command,
+    /// Rhai source following the explicit [`SCRIPT_MARKER`].
+    Script,
+}
+
+/// Classify submitted command input by its explicit script marker.
+///
+/// Only a leading `=` selects Rhai. Everything else keeps the ordinary command
+/// path, so a call that merely resembles a command such as `play()` and unknown
+/// input both report command errors instead of being evaluated as scripts, and a
+/// script error never sends the same text back through command parsing.
+pub fn classify(input: &str) -> CommandForm {
+    if input.trim_start().starts_with(SCRIPT_MARKER) {
+        CommandForm::Script
+    } else {
+        CommandForm::Command
+    }
+}
+
+/// Return the Rhai body following the leading marker, trimmed.
+///
+/// A bare marker yields an empty body, which callers treat as no effect.
+pub fn script_body(input: &str) -> Option<&str> {
+    input
+        .trim_start()
+        .strip_prefix(SCRIPT_MARKER)
+        .map(str::trim)
+}
+
+/// A command line that is only a positive row number, used for navigation.
+pub fn decimal_line(input: &str) -> Option<usize> {
+    if input.is_empty() || !input.bytes().all(|digit| digit.is_ascii_digit()) {
+        return None;
+    }
+    Some(input.bytes().fold(0usize, |number, digit| {
+        number
+            .saturating_mul(10)
+            .saturating_add(usize::from(digit - b'0'))
+    }))
+}
+
 #[derive(Default)]
 pub struct CommandLine {
     text: String,
@@ -422,6 +474,84 @@ pub fn expand_path(path: &str) -> PathBuf {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn only_marked_input_reaches_the_script_worker() {
+        for input in [
+            "",
+            "   ",
+            "play",
+            "  quit  ",
+            "q",
+            "stop",
+            "detach",
+            "next",
+            "pause",
+            "prev",
+            "import \"a b/song.ncm\"",
+            "import ~/Music",
+            "playlist new Focus",
+            "volume set 50",
+            "play 42",
+            "23",
+            "7",
+            // A call that merely resembles a command stays ordinary input.
+            "play()",
+            "seek(90, unit::SEC)",
+        ] {
+            assert_eq!(
+                classify(input),
+                CommandForm::Command,
+                "{input:?} must stay on the command path"
+            );
+        }
+        for input in ["=play()", " =version()", "=23", "=seek(90, ", "=音", "="] {
+            assert_eq!(
+                classify(input),
+                CommandForm::Script,
+                "{input:?} must go to the script worker"
+            );
+        }
+    }
+
+    #[test]
+    fn the_script_body_is_trimmed_and_empty_for_a_bare_marker() {
+        assert_eq!(script_body(" =play()"), Some("play()"));
+        assert_eq!(script_body("=seek(90, "), Some("seek(90,"));
+        assert_eq!(script_body(" = 23 "), Some("23"));
+        assert_eq!(script_body("="), Some(""));
+        assert_eq!(script_body("play"), None);
+        assert_eq!(script_body("play()"), None);
+    }
+
+    #[test]
+    fn numeric_navigation_is_only_a_jump_target_for_plain_decimals() {
+        assert_eq!(decimal_line("23"), Some(23));
+        assert_eq!(decimal_line("007"), Some(7));
+        for input in ["2 3", "2a", "-1", "1.5", "23G", "音"] {
+            assert_eq!(decimal_line(input), None, "{input:?} is not a jump target");
+            assert_eq!(classify(input), CommandForm::Command);
+        }
+    }
+
+    #[test]
+    fn unprefixed_function_syntax_never_selects_script_mode() {
+        // `play()` is not the ordinary `play` command, and neither is unknown
+        // input: both stay command errors instead of being evaluated as scripts.
+        assert_eq!(BuiltinCommand::parse("play()"), None);
+        assert_eq!(BuiltinCommand::parse("stop anything"), None);
+        assert_eq!(classify("play()"), CommandForm::Command);
+        assert_eq!(classify("stop anything"), CommandForm::Command);
+        assert_eq!(
+            BuiltinCommand::parse("play"),
+            Some((BuiltinCommand::Play, ""))
+        );
+        assert_eq!(
+            BuiltinCommand::parse("play 42"),
+            Some((BuiltinCommand::Play, "42"))
+        );
+        assert_eq!(classify("play"), CommandForm::Command);
+    }
 
     fn line(text: &str) -> CommandLine {
         CommandLine {

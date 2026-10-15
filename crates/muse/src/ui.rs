@@ -12,6 +12,7 @@ use std::{
 use crate::{
     command::{BuiltinCommand, CommandLine, CursorMove, expand_path},
     playback::View as PlaybackView,
+    scripting::ScriptWorker,
     search::{Direction, Search},
     service::Client as PlaybackWorker,
 };
@@ -124,6 +125,7 @@ struct App {
     worker: Option<ImportWorker>,
     playback: Option<PlaybackWorker>,
     playback_view: PlaybackView,
+    scripts: ScriptWorker,
     quitting: bool,
     exit_error: Option<String>,
 }
@@ -174,6 +176,7 @@ impl App {
             worker: None,
             playback: None,
             playback_view: PlaybackView::default(),
+            scripts: ScriptWorker::start(),
             quitting: false,
             exit_error: None,
         })
@@ -853,7 +856,15 @@ impl App {
     fn execute_command(&mut self, input: &str) {
         let input = input.trim();
         self.reset_navigation();
-        if let Some(line) = decimal_line(input) {
+        if crate::command::classify(input) == crate::command::CommandForm::Script {
+            match crate::command::script_body(input) {
+                Some(body) if !body.is_empty() => self.run_script(body),
+                // A bare marker has no effect at all.
+                _ => {}
+            }
+            return;
+        }
+        if let Some(line) = crate::command::decimal_line(input) {
             self.jump_song(line);
             return;
         }
@@ -929,6 +940,24 @@ impl App {
 
     fn quit(&mut self) {
         self.exit(false);
+    }
+
+    /// Submit colon input to the script worker.
+    ///
+    /// The worker owns the engine, so evaluation never blocks rendering or input
+    /// handling; the outcome arrives through [`App::poll_scripts`].
+    fn run_script(&mut self, input: &str) {
+        match self.scripts.submit(input) {
+            Ok(()) => self.message = "Running script...".into(),
+            Err(error) => self.message = error,
+        }
+    }
+
+    /// Report finished script outcomes without blocking the event loop.
+    fn poll_scripts(&mut self) {
+        while let Some(result) = self.scripts.try_result() {
+            self.message = result;
+        }
     }
 
     fn exit(&mut self, detach: bool) {
@@ -2137,17 +2166,6 @@ fn time_label(duration: Duration) -> String {
     format!("{}:{:02}", duration.as_secs() / 60, duration.as_secs() % 60)
 }
 
-fn decimal_line(input: &str) -> Option<usize> {
-    if input.is_empty() || !input.bytes().all(|digit| digit.is_ascii_digit()) {
-        return None;
-    }
-    Some(input.bytes().fold(0usize, |number, digit| {
-        number
-            .saturating_mul(10)
-            .saturating_add(usize::from(digit - b'0'))
-    }))
-}
-
 impl Drop for App {
     fn drop(&mut self) {
         self.playback.take();
@@ -2236,6 +2254,7 @@ fn run_loop(app: &mut App, terminal: &mut UiTerminal) -> Result<(), Box<dyn Erro
         app.poll_import()?;
         app.poll_playback();
         app.poll_refresh();
+        app.poll_scripts();
         if app.quitting && app.worker.is_none() && app.playback.is_none() {
             return app.exit_error.take().map_or(Ok(()), |e| Err(e.into()));
         }
@@ -2326,6 +2345,92 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         }));
+    }
+
+    /// Wait until a submitted script has reported its outcome.
+    fn await_script(app: &mut App, done: impl Fn(&App) -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !done(app) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the script outcome never arrived: {}",
+                app.message
+            );
+            app.poll_scripts();
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn script_input_is_evaluated_off_the_ui_thread_and_reports_its_value() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = navigation_app(temporary.path().join("library.muse"), 12);
+        type_command(&mut app, "=version()");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.command.is_none());
+        assert_eq!(app.message, "Running script...");
+        let version = format!("muse {}", env!("CARGO_PKG_VERSION"));
+        await_script(&mut app, |app| app.message == version);
+        assert_eq!(app.message, version);
+    }
+
+    #[test]
+    fn malformed_script_input_reports_an_error_without_command_dispatch() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = navigation_app(temporary.path().join("library.muse"), 12);
+        app.selection.select(Some(7));
+        type_command(&mut app, "=seek(90, ");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        await_script(&mut app, |app| app.message.starts_with("Script error:"));
+        // The selection did not move, as a numeric command would have.
+        assert_eq!(app.selection.selected(), Some(7));
+    }
+
+    #[test]
+    fn a_marked_command_like_call_is_evaluated_as_a_script() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = navigation_app(temporary.path().join("library.muse"), 12);
+        type_command(&mut app, "=play()");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        await_script(&mut app, |app| app.message.starts_with("Script error:"));
+        // The command was not dispatched; only the script ran.
+        assert!(app.playback_view.pending.is_none());
+        assert!(app.playback_view.current.is_none());
+    }
+
+    #[test]
+    fn shipped_commands_still_dispatch_without_the_script_worker() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = navigation_app(temporary.path().join("library.muse"), 12);
+        type_command(&mut app, "5");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.selection.selected(), Some(4));
+        assert_eq!(
+            app.message,
+            "全部本地 is the current playlist. Enter plays inside it; r cycles mode; l opens lyrics. :import adds music. :next and :prev move through the current playlist. :pause and :play control playback."
+        );
+    }
+
+    #[test]
+    fn unmarked_call_is_not_evaluated_and_numeric_script_does_not_navigate() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = navigation_app(temporary.path().join("library.muse"), 12);
+        app.selection.select(Some(7));
+        app.execute_command("version()");
+        assert_eq!(app.message, "Unknown command: version()");
+        app.execute_command("=23");
+        await_script(&mut app, |app| app.message == "23");
+        assert_eq!(app.selection.selected(), Some(7));
+    }
+
+    #[test]
+    fn script_print_and_debug_return_through_status_message() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = navigation_app(temporary.path().join("library.muse"), 12);
+        app.execute_command("=print(\"hello\"); debug(42);");
+        await_script(&mut app, |app| {
+            app.message.contains("hello") && app.message.contains("42")
+        });
     }
 
     #[test]
