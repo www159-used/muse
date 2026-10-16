@@ -955,8 +955,23 @@ impl App {
 
     /// Report finished script outcomes without blocking the event loop.
     fn poll_scripts(&mut self) {
-        while let Some(result) = self.scripts.try_result() {
-            self.message = result;
+        while let Some(outcome) = self.scripts.try_outcome() {
+            self.message = outcome.text;
+            if let Some(view) = outcome.confirmed_seek
+                && self
+                    .playback
+                    .as_ref()
+                    .is_some_and(|playback| playback.view().current == view.current)
+            {
+                if self.message == "Script completed"
+                    && let Some(status) = view.status
+                {
+                    self.message = format!("Position: {}", time_label(status.position));
+                }
+                self.playback_view = view;
+                self.lyrics_following = true;
+                self.lyrics_paused_at = None;
+            }
         }
     }
 
@@ -4020,6 +4035,26 @@ mod tests {
         await_script(&mut app, |app| app.message == "Script completed");
         let paused = remote.call(crate::service::Command::Status, None).unwrap();
         assert_eq!(paused.status.unwrap().state, PlaybackState::Paused);
+
+        app.lyrics_following = false;
+        app.execute_command("=seek(0, unit::SEC);");
+        await_script(&mut app, |app| app.message.starts_with("Position: "));
+        assert!(app.lyrics_following);
+        assert_eq!(
+            app.playback_view.status.unwrap().state,
+            PlaybackState::Paused
+        );
+        app.lyrics_following = false;
+        app.execute_command("=seek(-1, unit::SEC);");
+        await_script(&mut app, |app| app.message.starts_with("Script error:"));
+        assert!(!app.lyrics_following);
+        app.execute_command("=seek_by(0.05, unit::SEC);");
+        await_script(&mut app, |app| app.message.starts_with("Position: "));
+        assert!(app.lyrics_following);
+        assert_eq!(
+            app.playback_view.status.unwrap().state,
+            PlaybackState::Paused
+        );
         app.execute_command("=play(); pause();");
         await_script(&mut app, |app| app.message == "Script completed");
         let paused = remote.call(crate::service::Command::Status, None).unwrap();

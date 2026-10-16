@@ -24,11 +24,11 @@ Dependencies: phase 1. Outcome: scripts can perform ordered operations with reli
 
 Dependencies: phases 1–2. Outcome: time and percentage seeking work from Rhai through the service.
 
-- [ ] 3.1 Register host Unit values under `unit::MS`, `SEC`, `MIN`, `HOUR`, and `PERCENT`; verify names resolve to the custom type and string units are rejected.
-- [ ] 3.2 Implement one checked integer/float conversion path with documented round-to-nearest millisecond behavior; verify negative absolute values, non-finite numbers, overflow, fractional values, and conversion boundaries.
-- [ ] 3.3 Register absolute time `seek(value, unit)` and signed relative time `seek_by(value, unit)`; verify execution-time relative positioning, missing-source errors, unknown-duration time seeks, and rejection of PERCENT for relative movement.
-- [ ] 3.4 Add percentage seek handling in the matching service session and update protocol compatibility as required; verify 0/50/100 percent, invalid percentages, unavailable duration, stale identities, and explicit version mismatch without restarting a playing service.
-- [ ] 3.5 Publish confirmed seek results to the TUI and restore lyric following only for a successful relevant manual seek; verify paused intent, backend bounds, failures, and stale completion handling.
+- [x] 3.1 Register host Unit values under `unit::MS`, `SEC`, `MIN`, `HOUR`, and `PERCENT`; verify names resolve to the custom type and string units are rejected.
+- [x] 3.2 Implement one checked integer/float conversion path with documented round-to-nearest millisecond behavior; verify negative absolute values, non-finite numbers, overflow, fractional values, and conversion boundaries.
+- [x] 3.3 Register absolute time `seek(value, unit)` and signed relative time `seek_by(value, unit)`; verify execution-time relative positioning, missing-source errors, unknown-duration time seeks, and rejection of PERCENT for relative movement.
+- [x] 3.4 Add percentage seek handling in the matching service session and update protocol compatibility as required; verify 0/50/100 percent, invalid percentages, unavailable duration, stale identities, and explicit version mismatch without restarting a playing service.
+- [x] 3.5 Publish confirmed seek results to the TUI and restore lyric following only for a successful relevant manual seek; verify paused intent, backend bounds, failures, and stale completion handling.
 
 ## 4. Unify existing interactive operations under Rhai
 

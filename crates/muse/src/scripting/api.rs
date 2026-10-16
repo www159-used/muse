@@ -98,6 +98,71 @@ impl Unit {
     pub const fn all() -> [Self; 5] {
         [Self::MS, Self::SEC, Self::MIN, Self::HOUR, Self::PERCENT]
     }
+
+    fn millis_per_unit(self) -> Option<u64> {
+        match self.kind {
+            UnitKind::MS => Some(1),
+            UnitKind::SEC => Some(1_000),
+            UnitKind::MIN => Some(60_000),
+            UnitKind::HOUR => Some(3_600_000),
+            UnitKind::PERCENT => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Number {
+    Integer(i64),
+    Float(f64),
+}
+
+/// Time arguments are rounded to the nearest millisecond, with half milliseconds
+/// rounded away from zero. Integer multiplication stays exact until the final
+/// u64 bound check, so large integers never silently lose precision through f64.
+fn seek_command(value: Number, unit: Unit, relative: bool) -> Result<Command, String> {
+    if unit.is_percent() {
+        if relative {
+            return Err("seek_by does not accept unit::PERCENT".into());
+        }
+        let percent = match value {
+            Number::Integer(value) => value as f64,
+            Number::Float(value) => value,
+        };
+        if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
+            return Err("percentage must be finite and between 0 and 100".into());
+        }
+        return Ok(Command::SeekPercent(percent));
+    }
+    let scale = unit.millis_per_unit().expect("time unit has a scale");
+    let (direction, millis) = match value {
+        Number::Integer(value) => {
+            if !relative && value < 0 {
+                return Err("absolute seek must be nonnegative".into());
+            }
+            let millis = i128::from(value).unsigned_abs() * u128::from(scale);
+            (
+                value.signum(),
+                u64::try_from(millis).map_err(|_| "seek value exceeds supported duration")?,
+            )
+        }
+        Number::Float(value) => {
+            if !value.is_finite() {
+                return Err("seek value must be finite".into());
+            }
+            if !relative && value < 0.0 {
+                return Err("absolute seek must be nonnegative".into());
+            }
+            let millis = (value.abs() * scale as f64).round();
+            if !millis.is_finite() || millis >= 18446744073709551616.0 {
+                return Err("seek value exceeds supported duration".into());
+            }
+            (if value < 0.0 { -1 } else { 1 }, millis as u64)
+        }
+    };
+    Ok(Command::Seek {
+        direction: if relative { direction as i8 } else { 0 },
+        millis,
+    })
 }
 
 /// Semantic role of a parameter.
@@ -275,6 +340,62 @@ fn stop_install(engine: &mut Engine, host: &Host) {
     engine.register_fn("stop", move || host.execute(Command::Stop));
 }
 
+fn seek_install(engine: &mut Engine, host: &Host) {
+    let integer_host = host.clone();
+    engine.register_fn("seek", move |value: i64, unit: Unit| {
+        integer_host.execute(
+            seek_command(Number::Integer(value), unit, false)
+                .map_err(super::host::runtime_error)?,
+        )
+    });
+    let float_host = host.clone();
+    engine.register_fn("seek", move |value: f64, unit: Unit| {
+        float_host.execute(
+            seek_command(Number::Float(value), unit, false).map_err(super::host::runtime_error)?,
+        )
+    });
+}
+
+fn seek_by_install(engine: &mut Engine, host: &Host) {
+    let integer_host = host.clone();
+    engine.register_fn("seek_by", move |value: i64, unit: Unit| {
+        integer_host.execute(
+            seek_command(Number::Integer(value), unit, true).map_err(super::host::runtime_error)?,
+        )
+    });
+    let float_host = host.clone();
+    engine.register_fn("seek_by", move |value: f64, unit: Unit| {
+        float_host.execute(
+            seek_command(Number::Float(value), unit, true).map_err(super::host::runtime_error)?,
+        )
+    });
+}
+
+const SEEK_PARAMS: &[Param] = &[
+    Param {
+        name: "value",
+        role: ParamRole::Value,
+        docs: "Numeric position or offset.",
+    },
+    Param {
+        name: "unit",
+        role: ParamRole::Unit { percent: true },
+        docs: "Host-defined time or percentage unit.",
+    },
+];
+const SEEK_BY_PARAMS: &[Param] = &[
+    Param {
+        name: "value",
+        role: ParamRole::Value,
+        docs: "Signed numeric offset.",
+    },
+    Param {
+        name: "unit",
+        role: ParamRole::Unit { percent: false },
+        docs: "Host-defined time unit.",
+    },
+];
+
 /// Every callable application API.
 ///
 /// Each entry carries the code that registers it into an engine, so a callable
@@ -307,6 +428,20 @@ pub const FUNCTIONS: &[Function] = &[
         "()",
         "Stop playback after confirmed service execution.",
         stop_install,
+    ),
+    Function::new(
+        "seek",
+        SEEK_PARAMS,
+        "()",
+        "Seek to an absolute time or full-track percentage.",
+        seek_install,
+    ),
+    Function::new(
+        "seek_by",
+        SEEK_BY_PARAMS,
+        "()",
+        "Seek relative to the execution-time position.",
+        seek_by_install,
     ),
 ];
 
@@ -359,10 +494,20 @@ pub fn verify_parity(engine: &Engine, catalog: &Catalog) -> Result<(), String> {
             return Err(format!("{} has no documentation", function.name));
         }
         let signature = function.signature();
-        if !signatures
-            .iter()
-            .any(|registered| registered.contains(&signature))
-        {
+        let registered = signatures.iter().any(|registered| {
+            registered
+                .strip_prefix(&format!("{}(", function.name))
+                .and_then(|params| params.split_once(')'))
+                .is_some_and(|(params, _)| {
+                    let count = if params.is_empty() {
+                        0
+                    } else {
+                        params.split(',').count()
+                    };
+                    count == function.params.len()
+                })
+        });
+        if !registered {
             return Err(format!(
                 "{signature} is registered but missing from the engine metadata"
             ));
@@ -449,6 +594,65 @@ mod tests {
         }
         let wrong_unit: Result<Unit, _> = engine.eval("\"SEC\"");
         assert!(wrong_unit.is_err());
+    }
+
+    #[test]
+    fn seek_conversion_checks_units_signs_rounding_and_bounds() {
+        let convert = seek_command;
+        assert!(matches!(
+            convert(Number::Integer(90), Unit::SEC, false),
+            Ok(Command::Seek {
+                direction: 0,
+                millis: 90_000
+            })
+        ));
+        assert!(matches!(
+            convert(Number::Float(1.5), Unit::MIN, false),
+            Ok(Command::Seek {
+                direction: 0,
+                millis: 90_000
+            })
+        ));
+        assert!(matches!(
+            convert(Number::Float(0.0005), Unit::SEC, false),
+            Ok(Command::Seek {
+                direction: 0,
+                millis: 1
+            })
+        ));
+        assert!(matches!(
+            convert(Number::Float(-0.0005), Unit::SEC, true),
+            Ok(Command::Seek {
+                direction: -1,
+                millis: 1
+            })
+        ));
+        assert!(matches!(
+            convert(Number::Integer(-10), Unit::SEC, true),
+            Ok(Command::Seek {
+                direction: -1,
+                millis: 10_000
+            })
+        ));
+        assert!(matches!(
+            convert(Number::Float(50.0), Unit::PERCENT, false),
+            Ok(Command::SeekPercent(50.0))
+        ));
+        for result in [
+            convert(Number::Integer(-1), Unit::SEC, false),
+            convert(Number::Float(f64::NAN), Unit::SEC, false),
+            convert(Number::Float(f64::INFINITY), Unit::PERCENT, false),
+            convert(Number::Float(100.1), Unit::PERCENT, false),
+            convert(Number::Integer(i64::MAX), Unit::HOUR, false),
+            convert(Number::Float(f64::MAX), Unit::SEC, false),
+            convert(Number::Integer(10), Unit::PERCENT, true),
+        ] {
+            assert!(result.is_err());
+        }
+        let mut engine = Engine::new();
+        install(&mut engine);
+        assert!(engine.eval::<()>("seek(10, \"SEC\")").is_err());
+        assert!(engine.eval::<()>("seek(\"10\", unit::SEC)").is_err());
     }
 
     #[test]

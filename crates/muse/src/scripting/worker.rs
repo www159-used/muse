@@ -11,6 +11,7 @@
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 
 use super::host::Host;
+use crate::playback::View;
 use crate::scripting::session::{Evaluation, Session};
 use crate::service::Client;
 use std::sync::{
@@ -36,22 +37,29 @@ pub enum ScriptRequest {
 }
 
 /// One finished message sent from the worker to the UI.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum ScriptMessage {
     /// Evaluation finished; the text is ready for the status line.
-    Evaluated(String),
+    Evaluated(Box<ScriptOutcome>),
     /// The worker stopped and cannot accept more submissions.
     Stopped,
 }
 
+#[cfg(test)]
 impl ScriptMessage {
     /// Status-line text for a finished message.
     pub fn text(self) -> String {
         match self {
-            Self::Evaluated(text) => text,
+            Self::Evaluated(outcome) => outcome.text,
             Self::Stopped => "The script worker stopped; restart muse to run scripts".into(),
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct ScriptOutcome {
+    pub text: String,
+    pub confirmed_seek: Option<View>,
 }
 
 /// Handle to the serialized script worker.
@@ -111,8 +119,19 @@ impl ScriptWorker {
     }
 
     /// Take the oldest finished message, if the worker has already produced one.
+    #[cfg(test)]
     pub fn try_result(&self) -> Option<String> {
         self.messages.try_recv().ok().map(ScriptMessage::text)
+    }
+
+    pub fn try_outcome(&self) -> Option<ScriptOutcome> {
+        self.messages.try_recv().ok().map(|message| match message {
+            ScriptMessage::Evaluated(outcome) => *outcome,
+            ScriptMessage::Stopped => ScriptOutcome {
+                text: "The script worker stopped; restart muse to run scripts".into(),
+                confirmed_seek: None,
+            },
+        })
     }
 
     /// Ask the worker to stop.
@@ -135,15 +154,20 @@ fn run(
     host: Host,
     cancelled: Arc<AtomicBool>,
 ) {
-    let mut session = Session::with_host_and_cancel(host, cancelled.clone());
+    let mut session = Session::with_host_and_cancel(host.clone(), cancelled.clone());
     while let Ok(request) = inbox.recv() {
         if cancelled.load(Ordering::Acquire) {
             break;
         }
         match request {
             ScriptRequest::Evaluate(input) => {
+                host.take_confirmed_seek();
+                let evaluation = session.evaluate(&input);
                 if outbox
-                    .send(ScriptMessage::Evaluated(report(session.evaluate(&input))))
+                    .send(ScriptMessage::Evaluated(Box::new(ScriptOutcome {
+                        text: report(evaluation),
+                        confirmed_seek: host.take_confirmed_seek(),
+                    })))
                     .is_err()
                 {
                     break;

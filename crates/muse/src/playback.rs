@@ -112,6 +112,7 @@ pub(crate) enum Action {
     Play,
     Pause,
     Seek(SeekTarget),
+    SeekPercent(f64),
     Stop,
     SetVolume(u8),
     IncVolume(u32),
@@ -372,19 +373,31 @@ impl Worker {
                             {
                                 match player.as_mut() {
                                     Some(player) => match action {
-                                        Action::Play => player.play(),
-                                        Action::Toggle => player.status().and_then(|status| {
-                                            if status.state == PlaybackState::Playing {
-                                                player.pause()
-                                            } else {
-                                                player.play()
-                                            }
-                                        }),
-                                        Action::Seek(target) => player.seek(target).map(|_| ()),
-                                        Action::Stop => player.stop(),
+                                        Action::Play => {
+                                            player.play().map_err(|error| error.to_string())
+                                        }
+                                        Action::Toggle => player
+                                            .status()
+                                            .and_then(|status| {
+                                                if status.state == PlaybackState::Playing {
+                                                    player.pause()
+                                                } else {
+                                                    player.play()
+                                                }
+                                            })
+                                            .map_err(|error| error.to_string()),
+                                        Action::Seek(target) => player
+                                            .seek(target)
+                                            .map(|_| ())
+                                            .map_err(|error| error.to_string()),
+                                        Action::SeekPercent(percent) => {
+                                            seek_percent(player, percent)
+                                        }
+                                        Action::Stop => {
+                                            player.stop().map_err(|error| error.to_string())
+                                        }
                                         _ => unreachable!(),
-                                    }
-                                    .map_err(|error| error.to_string()),
+                                    },
                                     None if matches!(action, Action::Stop) => Ok(()),
                                     None => Err(
                                         "no track loaded; press Enter to play the selected track"
@@ -565,6 +578,26 @@ fn commit_volume<P: Playback>(
     }
     *volume = next;
     Ok(())
+}
+
+fn seek_percent<P: Playback>(player: &mut P, percent: f64) -> Result<(), String> {
+    if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
+        return Err("percentage must be finite and between 0 and 100".into());
+    }
+    let duration = player
+        .status()
+        .map_err(|error| error.to_string())?
+        .duration
+        .filter(|duration| !duration.is_zero())
+        .ok_or("percentage seek requires a known positive duration")?;
+    let millis = (duration.as_secs_f64() * 1_000.0 * percent / 100.0).round();
+    if !millis.is_finite() || millis >= 18446744073709551616.0 {
+        return Err("percentage target exceeds supported duration".into());
+    }
+    player
+        .seek(SeekTarget::Absolute(Duration::from_millis(millis as u64)))
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn update_status<P: Playback>(
@@ -982,6 +1015,40 @@ mod tests {
             }
             Ok(*status)
         }
+    }
+
+    #[test]
+    fn percentage_seek_requires_a_known_positive_duration() {
+        let mut player = Scripted {
+            status: Mutex::new(PlaybackStatus {
+                state: PlaybackState::Ready,
+                position: Duration::from_millis(250),
+                duration: None,
+            }),
+            finish: Arc::new(AtomicBool::new(false)),
+            loads: Arc::new(Mutex::new(Vec::new())),
+            plays: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            volume: Arc::new(std::sync::atomic::AtomicU8::new(100)),
+        };
+        assert!(
+            seek_percent(&mut player, 50.0)
+                .unwrap_err()
+                .contains("known positive duration")
+        );
+        assert_eq!(
+            player.status().unwrap().position,
+            Duration::from_millis(250)
+        );
+        player.status.lock().unwrap().duration = Some(Duration::ZERO);
+        assert!(
+            seek_percent(&mut player, 50.0)
+                .unwrap_err()
+                .contains("known positive duration")
+        );
+        assert_eq!(
+            player.status().unwrap().position,
+            Duration::from_millis(250)
+        );
     }
 
     fn wait_until(worker: &Worker, predicate: impl Fn(&View) -> bool) {

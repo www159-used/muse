@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 pub const TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_FRAME: usize = 64 * 1024;
 
@@ -28,6 +28,7 @@ pub enum Command {
     Pause,
     Toggle,
     Seek { direction: i8, millis: u64 },
+    SeekPercent(f64),
     Stop,
     Shutdown,
     SetVolume(u8),
@@ -61,6 +62,7 @@ impl Command {
                 0 => SeekTarget::Absolute(Duration::from_millis(millis)),
                 _ => SeekTarget::Forward(Duration::from_millis(millis)),
             }),
+            Self::SeekPercent(percent) => Action::SeekPercent(percent),
             Self::Stop | Self::Shutdown => Action::Stop,
             Self::SetVolume(volume) => Action::SetVolume(volume),
             Self::IncVolume(steps) => Action::IncVolume(steps),

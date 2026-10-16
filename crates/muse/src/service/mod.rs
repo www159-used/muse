@@ -133,8 +133,14 @@ impl Remote {
                 "service response lost; outcome unconfirmed, inspect status before retrying: {e}"
             )
         })?;
-        if response.version != VERSION || response.id != id {
-            return Err("invalid playback service response".into());
+        if response.version != VERSION {
+            return Err(format!(
+                "incompatible playback service protocol: expected version {VERSION}, received {}",
+                response.version
+            ));
+        }
+        if response.id != id {
+            return Err("invalid playback service response id".into());
         }
         response.result.map(Into::into)
     }
@@ -241,10 +247,10 @@ pub(crate) fn run_with(
                         else {
                             return;
                         };
-                        let result = if request.version != VERSION
-                            || request.token != endpoint.token
-                        {
-                            Err("incompatible or unauthenticated playback request".into())
+                        let result = if request.version != VERSION {
+                            Err(format!("incompatible playback service protocol: expected version {VERSION}, received {}", request.version))
+                        } else if request.token != endpoint.token {
+                            Err("unauthenticated playback request".into())
                         } else if matches!(request.command, Command::Status) {
                             Ok(worker.view())
                         } else if request.command.loads() && worker.view().pending.is_some() {
