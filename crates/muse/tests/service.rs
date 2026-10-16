@@ -120,6 +120,49 @@ fn stale_seek_and_failed_load_preserve_the_new_track() {
 }
 
 #[test]
+fn percentage_seek_uses_matching_session_duration_and_rejects_bad_targets() {
+    let session = Session::new();
+    let empty = session.rpc(json!({"SeekPercent": 50.0}), json!(null));
+    assert!(
+        empty["result"]["Err"]
+            .as_str()
+            .unwrap()
+            .contains("no track loaded")
+    );
+    session.play();
+    success(cli(&session.directory, &["pause"]));
+    let current = session.rpc(json!("Status"), json!(null))["result"]["Ok"]["current"].clone();
+    for (percent, expected) in [(0.0, 0), (50.0, 1_800_000), (100.0, 3_600_000)] {
+        let result = session.rpc(json!({"SeekPercent": percent}), current.clone());
+        assert_eq!(
+            result["result"]["Ok"]["status"]["position"]["secs"]
+                .as_u64()
+                .unwrap()
+                * 1000,
+            expected
+        );
+        assert_eq!(result["result"]["Ok"]["status"]["state"], "Paused");
+    }
+    let relative = session.rpc(
+        json!({"Seek": {"direction": -1, "millis": 10_000}}),
+        current.clone(),
+    );
+    assert_eq!(relative["result"]["Ok"]["status"]["position"]["secs"], 3590);
+    for percent in [-1.0, 100.01] {
+        let result = session.rpc(json!({"SeekPercent": percent}), current.clone());
+        assert!(
+            result["result"]["Err"]
+                .as_str()
+                .unwrap()
+                .contains("percentage")
+        );
+    }
+    session.play();
+    let stale = session.rpc(json!({"SeekPercent": 50.0}), current);
+    assert!(stale["result"]["Err"].as_str().unwrap().contains("stale"));
+}
+
+#[test]
 fn empty_observation_and_invalid_commands_have_no_side_effects() {
     let directory = tempfile::TempDir::new().unwrap();
     for args in [vec!["status"], vec!["stop"], vec!["shutdown"]] {
@@ -247,7 +290,10 @@ fn unauthenticated_oversized_and_incompatible_requests_preserve_playback() {
         Ipv4Addr::LOCALHOST,
         endpoint["port"].as_u64().unwrap() as u16,
     );
-    for (version, token) in [(1, "incorrect"), (999, endpoint["token"].as_str().unwrap())] {
+    for (version, token, error) in [
+        (5, "incorrect", "unauthenticated"),
+        (999, endpoint["token"].as_str().unwrap(), "incompatible"),
+    ] {
         let mut stream = TcpStream::connect(address).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
@@ -262,7 +308,7 @@ fn unauthenticated_oversized_and_incompatible_requests_preserve_playback() {
         stream.write_all(&data).unwrap();
         let mut response = Vec::new();
         stream.read_to_end(&mut response).unwrap();
-        assert!(String::from_utf8_lossy(&response).contains("unauthenticated"));
+        assert!(String::from_utf8_lossy(&response).contains(error));
     }
     let mut stream = TcpStream::connect(address).unwrap();
     stream
