@@ -7,6 +7,8 @@
 //! engine registration and the completion catalog therefore cannot drift apart:
 //! both are derived from the same [`FUNCTIONS`] and [`CONSTANTS`] tables.
 
+use super::host::Host;
+use crate::service::Command;
 use rhai::{CustomType, Engine, Module};
 
 /// Host-defined unit values for explicit numeric arguments.
@@ -141,7 +143,7 @@ pub struct Param {
 ///
 /// A descriptor may install several overloads behind one user-facing signature,
 /// as long as the catalog entry describes the callable set accurately.
-type InstallFn = fn(&mut Engine);
+type InstallFn = fn(&mut Engine, &Host);
 
 /// One callable application API.
 #[derive(Clone, Copy, Debug)]
@@ -187,8 +189,8 @@ impl Function {
     }
 
     /// Register the callable forms into `engine`.
-    pub fn install(&self, engine: &mut Engine) {
-        (self.install)(engine);
+    pub fn install(&self, engine: &mut Engine, host: &Host) {
+        (self.install)(engine, host);
     }
 }
 
@@ -254,21 +256,59 @@ fn version() -> String {
 }
 
 /// Registers `version` into an engine.
-fn version_install(engine: &mut Engine) {
+fn version_install(engine: &mut Engine, _host: &Host) {
     engine.register_fn("version", version);
+}
+
+fn play_install(engine: &mut Engine, host: &Host) {
+    let host = host.clone();
+    engine.register_fn("play", move || host.execute(Command::Play));
+}
+
+fn pause_install(engine: &mut Engine, host: &Host) {
+    let host = host.clone();
+    engine.register_fn("pause", move || host.execute(Command::Pause));
+}
+
+fn stop_install(engine: &mut Engine, host: &Host) {
+    let host = host.clone();
+    engine.register_fn("stop", move || host.execute(Command::Stop));
 }
 
 /// Every callable application API.
 ///
 /// Each entry carries the code that registers it into an engine, so a callable
 /// and its catalog entry are added together.
-pub const FUNCTIONS: &[Function] = &[Function::new(
-    "version",
-    &[],
-    "string",
-    "Return the muse version string.",
-    version_install,
-)];
+pub const FUNCTIONS: &[Function] = &[
+    Function::new(
+        "version",
+        &[],
+        "string",
+        "Return the muse version string.",
+        version_install,
+    ),
+    Function::new(
+        "play",
+        &[],
+        "()",
+        "Resume the loaded track after confirmed service execution.",
+        play_install,
+    ),
+    Function::new(
+        "pause",
+        &[],
+        "()",
+        "Pause playback after confirmed service execution.",
+        pause_install,
+    ),
+    Function::new(
+        "stop",
+        &[],
+        "()",
+        "Stop playback after confirmed service execution.",
+        stop_install,
+    ),
+];
 
 /// Every exported constant namespace value.
 pub const CONSTANTS: &[Constant] = &[
@@ -286,10 +326,15 @@ pub const CONSTANTS: &[Constant] = &[
 
 /// Register the host type, every function and every constant namespace into
 /// `engine`, and return the catalog snapshot describing them.
+#[cfg(test)]
 pub fn install(engine: &mut Engine) -> Catalog {
+    install_with_host(engine, &Host::default())
+}
+
+pub fn install_with_host(engine: &mut Engine, host: &Host) -> Catalog {
     engine.build_type::<Unit>();
     for function in FUNCTIONS {
-        function.install(engine);
+        function.install(engine, host);
     }
     let mut module = Module::new();
     for constant in CONSTANTS {
@@ -454,7 +499,7 @@ mod tests {
         assert!(verify_parity(&engine, &catalog).is_ok());
         catalog
             .functions
-            .push(Function::new("seek", &[], "()", "Seek.", |_| {}));
+            .push(Function::new("seek", &[], "()", "Seek.", |_, _| {}));
         let error = verify_parity(&engine, &catalog).unwrap_err();
         assert!(error.contains("seek()"), "unexpected error: {error}");
     }
@@ -477,7 +522,7 @@ mod tests {
             ],
             "()",
             "Seek.",
-            |_| {},
+            |_, _| {},
         );
         assert_eq!(function.signature(), "seek(value, unit)");
         assert_eq!(function.params[0].role, ParamRole::Value);

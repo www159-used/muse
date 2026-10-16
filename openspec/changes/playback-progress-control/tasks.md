@@ -14,11 +14,11 @@ Dependencies: none. Outcome: `:=` evaluates a registered function without blocki
 
 Dependencies: phase 1. Outcome: scripts can perform ordered operations with reliable completion and failure feedback.
 
-- [ ] 2.1 Connect host calls to the existing operation layer with request-correlated completion; verify the script worker observes completed execution rather than queue acceptance.
-- [ ] 2.2 Preserve statement ordering across native calls and propagate failures; verify a failing first operation prevents an unhandled second operation, and earlier successful effects are never replayed or reported as rolled back.
-- [ ] 2.3 Carry expected playback identity through relevant requests and completion messages; verify a request for an old session cannot operate on or update the replacement track.
-- [ ] 2.4 Add script operation limits and bounded/cancellable waits for host calls; verify a runaway script, full queue, or unavailable service produces a useful error while rendering continues.
-- [ ] 2.5 Preserve the independent stop/quit control path and orderly worker shutdown; verify exit remains responsive during a pending script and existing quit/detach playback semantics are retained.
+- [x] 2.1 Connect host calls to the existing operation layer with request-correlated completion; verify the script worker observes completed execution rather than queue acceptance.
+- [x] 2.2 Preserve statement ordering across native calls and propagate failures; verify a failing first operation prevents an unhandled second operation, and earlier successful effects are never replayed or reported as rolled back.
+- [x] 2.3 Carry expected playback identity through relevant requests and completion messages; verify a request for an old session cannot operate on or update the replacement track.
+- [x] 2.4 Add script operation limits and bounded/cancellable waits for host calls; verify a runaway script, full queue, or unavailable service produces a useful error while rendering continues.
+- [x] 2.5 Preserve the independent stop/quit control path and orderly worker shutdown; verify exit remains responsive during a pending script and existing quit/detach playback semantics are retained.
 
 ## 3. Numeric seek APIs and unit namespace
 
