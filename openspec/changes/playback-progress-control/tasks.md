@@ -14,21 +14,21 @@ Dependencies: none. Outcome: `:=` evaluates a registered function without blocki
 
 Dependencies: phase 1. Outcome: scripts can perform ordered operations with reliable completion and failure feedback.
 
-- [ ] 2.1 Connect host calls to the existing operation layer with request-correlated completion; verify the script worker observes completed execution rather than queue acceptance.
-- [ ] 2.2 Preserve statement ordering across native calls and propagate failures; verify a failing first operation prevents an unhandled second operation, and earlier successful effects are never replayed or reported as rolled back.
-- [ ] 2.3 Carry expected playback identity through relevant requests and completion messages; verify a request for an old session cannot operate on or update the replacement track.
-- [ ] 2.4 Add script operation limits and bounded/cancellable waits for host calls; verify a runaway script, full queue, or unavailable service produces a useful error while rendering continues.
-- [ ] 2.5 Preserve the independent stop/quit control path and orderly worker shutdown; verify exit remains responsive during a pending script and existing quit/detach playback semantics are retained.
+- [x] 2.1 Connect host calls to the existing operation layer with request-correlated completion; verify the script worker observes completed execution rather than queue acceptance.
+- [x] 2.2 Preserve statement ordering across native calls and propagate failures; verify a failing first operation prevents an unhandled second operation, and earlier successful effects are never replayed or reported as rolled back.
+- [x] 2.3 Carry expected playback identity through relevant requests and completion messages; verify a request for an old session cannot operate on or update the replacement track.
+- [x] 2.4 Add script operation limits and bounded/cancellable waits for host calls; verify a runaway script, full queue, or unavailable service produces a useful error while rendering continues.
+- [x] 2.5 Preserve the independent stop/quit control path and orderly worker shutdown; verify exit remains responsive during a pending script and existing quit/detach playback semantics are retained.
 
 ## 3. Numeric seek APIs and unit namespace
 
 Dependencies: phases 1–2. Outcome: time and percentage seeking work from Rhai through the service.
 
-- [ ] 3.1 Register host Unit values under `unit::MS`, `SEC`, `MIN`, `HOUR`, and `PERCENT`; verify names resolve to the custom type and string units are rejected.
-- [ ] 3.2 Implement one checked integer/float conversion path with documented round-to-nearest millisecond behavior; verify negative absolute values, non-finite numbers, overflow, fractional values, and conversion boundaries.
-- [ ] 3.3 Register absolute time `seek(value, unit)` and signed relative time `seek_by(value, unit)`; verify execution-time relative positioning, missing-source errors, unknown-duration time seeks, and rejection of PERCENT for relative movement.
-- [ ] 3.4 Add percentage seek handling in the matching service session and update protocol compatibility as required; verify 0/50/100 percent, invalid percentages, unavailable duration, stale identities, and explicit version mismatch without restarting a playing service.
-- [ ] 3.5 Publish confirmed seek results to the TUI and restore lyric following only for a successful relevant manual seek; verify paused intent, backend bounds, failures, and stale completion handling.
+- [x] 3.1 Register host Unit values under `unit::MS`, `SEC`, `MIN`, `HOUR`, and `PERCENT`; verify names resolve to the custom type and string units are rejected.
+- [x] 3.2 Implement one checked integer/float conversion path with documented round-to-nearest millisecond behavior; verify negative absolute values, non-finite numbers, overflow, fractional values, and conversion boundaries.
+- [x] 3.3 Register absolute time `seek(value, unit)` and signed relative time `seek_by(value, unit)`; verify execution-time relative positioning, missing-source errors, unknown-duration time seeks, and rejection of PERCENT for relative movement.
+- [x] 3.4 Add percentage seek handling in the matching service session and update protocol compatibility as required; verify 0/50/100 percent, invalid percentages, unavailable duration, stale identities, and explicit version mismatch without restarting a playing service.
+- [x] 3.5 Publish confirmed seek results to the TUI and restore lyric following only for a successful relevant manual seek; verify paused intent, backend bounds, failures, and stale completion handling.
 
 ## 4. Unify existing interactive operations under Rhai
 

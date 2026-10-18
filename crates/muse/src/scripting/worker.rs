@@ -10,7 +10,14 @@
 
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 
+use super::host::Host;
+use crate::playback::View;
 use crate::scripting::session::{Evaluation, Session};
+use crate::service::Client;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 /// How many submissions may wait for the worker before the UI reports a busy
 /// script worker instead of queueing more work.
@@ -30,22 +37,29 @@ pub enum ScriptRequest {
 }
 
 /// One finished message sent from the worker to the UI.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum ScriptMessage {
     /// Evaluation finished; the text is ready for the status line.
-    Evaluated(String),
+    Evaluated(Box<ScriptOutcome>),
     /// The worker stopped and cannot accept more submissions.
     Stopped,
 }
 
+#[cfg(test)]
 impl ScriptMessage {
     /// Status-line text for a finished message.
     pub fn text(self) -> String {
         match self {
-            Self::Evaluated(text) => text,
+            Self::Evaluated(outcome) => outcome.text,
             Self::Stopped => "The script worker stopped; restart muse to run scripts".into(),
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct ScriptOutcome {
+    pub text: String,
+    pub confirmed_seek: Option<View>,
 }
 
 /// Handle to the serialized script worker.
@@ -56,18 +70,33 @@ impl ScriptMessage {
 pub struct ScriptWorker {
     requests: SyncSender<ScriptRequest>,
     messages: Receiver<ScriptMessage>,
+    host: Host,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl ScriptWorker {
     /// Start the worker thread with a fresh session.
     pub fn start() -> Self {
+        let host = Host::default();
+        let cancelled = Arc::new(AtomicBool::new(false));
         let (requests, inbox) = sync_channel(REQUEST_CAPACITY);
         let (outbox, messages) = sync_channel(RESULT_CAPACITY);
+        let thread_host = host.clone();
+        let thread_cancelled = cancelled.clone();
         std::thread::Builder::new()
             .name("muse-scripts".into())
-            .spawn(move || run(inbox, outbox))
+            .spawn(move || run(inbox, outbox, thread_host, thread_cancelled))
             .expect("the script worker thread starts");
-        Self { requests, messages }
+        Self {
+            requests,
+            messages,
+            host,
+            cancelled,
+        }
+    }
+
+    pub fn attach(&self, client: Arc<Client>) {
+        self.host.attach(client);
     }
 
     /// Submit one command line for evaluation.
@@ -90,12 +119,24 @@ impl ScriptWorker {
     }
 
     /// Take the oldest finished message, if the worker has already produced one.
+    #[cfg(test)]
     pub fn try_result(&self) -> Option<String> {
         self.messages.try_recv().ok().map(ScriptMessage::text)
     }
 
+    pub fn try_outcome(&self) -> Option<ScriptOutcome> {
+        self.messages.try_recv().ok().map(|message| match message {
+            ScriptMessage::Evaluated(outcome) => *outcome,
+            ScriptMessage::Stopped => ScriptOutcome {
+                text: "The script worker stopped; restart muse to run scripts".into(),
+                confirmed_seek: None,
+            },
+        })
+    }
+
     /// Ask the worker to stop.
     pub fn shutdown(&self) {
+        self.cancelled.store(true, Ordering::Release);
         let _ = self.requests.try_send(ScriptRequest::Shutdown);
     }
 }
@@ -107,13 +148,26 @@ impl Drop for ScriptWorker {
 }
 
 /// Worker loop: evaluate one request at a time, in submission order.
-fn run(inbox: Receiver<ScriptRequest>, outbox: SyncSender<ScriptMessage>) {
-    let mut session = Session::new();
+fn run(
+    inbox: Receiver<ScriptRequest>,
+    outbox: SyncSender<ScriptMessage>,
+    host: Host,
+    cancelled: Arc<AtomicBool>,
+) {
+    let mut session = Session::with_host_and_cancel(host.clone(), cancelled.clone());
     while let Ok(request) = inbox.recv() {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
         match request {
             ScriptRequest::Evaluate(input) => {
+                host.take_confirmed_seek();
+                let evaluation = session.evaluate(&input);
                 if outbox
-                    .send(ScriptMessage::Evaluated(report(session.evaluate(&input))))
+                    .send(ScriptMessage::Evaluated(Box::new(ScriptOutcome {
+                        text: report(evaluation),
+                        confirmed_seek: host.take_confirmed_seek(),
+                    })))
                     .is_err()
                 {
                     break;
@@ -198,7 +252,12 @@ mod tests {
         let (outbox, messages) = sync_channel::<ScriptMessage>(1);
         drop(inbox);
         drop(outbox);
-        let worker = ScriptWorker { requests, messages };
+        let worker = ScriptWorker {
+            requests,
+            messages,
+            host: Host::default(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
         let error = worker.submit("1 + 1").unwrap_err();
         assert!(error.contains("stopped"), "unexpected error: {error}");
     }

@@ -4,7 +4,7 @@ use std::{
     error::Error,
     io::{Stdout, Write},
     path::{Path, PathBuf},
-    sync::{atomic::Ordering, mpsc::TryRecvError},
+    sync::{Arc, atomic::Ordering, mpsc::TryRecvError},
     thread,
     time::{Duration, Instant},
 };
@@ -123,7 +123,7 @@ struct App {
     navigation_count: Option<usize>,
     pending_g: bool,
     worker: Option<ImportWorker>,
-    playback: Option<PlaybackWorker>,
+    playback: Option<Arc<PlaybackWorker>>,
     playback_view: PlaybackView,
     scripts: ScriptWorker,
     quitting: bool,
@@ -955,13 +955,29 @@ impl App {
 
     /// Report finished script outcomes without blocking the event loop.
     fn poll_scripts(&mut self) {
-        while let Some(result) = self.scripts.try_result() {
-            self.message = result;
+        while let Some(outcome) = self.scripts.try_outcome() {
+            self.message = outcome.text;
+            if let Some(view) = outcome.confirmed_seek
+                && self
+                    .playback
+                    .as_ref()
+                    .is_some_and(|playback| playback.view().current == view.current)
+            {
+                if self.message == "Script completed"
+                    && let Some(status) = view.status
+                {
+                    self.message = format!("Position: {}", time_label(status.position));
+                }
+                self.playback_view = view;
+                self.lyrics_following = true;
+                self.lyrics_paused_at = None;
+            }
         }
     }
 
     fn exit(&mut self, detach: bool) {
         self.quitting = true;
+        self.scripts.shutdown();
         if detach {
             self.exit_error = None;
         }
@@ -2202,6 +2218,8 @@ pub fn run(path: PathBuf) -> Result<(), Box<dyn Error>> {
     app.refresh = Some(crate::refresh::Reader::start(path.clone()));
     match crate::service::Remote::attach(&path).and_then(PlaybackWorker::start) {
         Ok(playback) => {
+            let playback = Arc::new(playback);
+            app.scripts.attach(playback.clone());
             app.playback_view = playback.view();
             app.playback = Some(playback);
         }
@@ -2468,6 +2486,17 @@ mod tests {
         await_script(&mut app, |app| {
             app.message.contains("hello") && app.message.contains("42")
         });
+    }
+
+    #[test]
+    fn quit_remains_responsive_during_a_pending_script() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = navigation_app(temporary.path().join("library.muse"), 1);
+        app.execute_command("=while true {}");
+        let start = Instant::now();
+        app.quit();
+        assert!(app.quitting);
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
@@ -4012,6 +4041,70 @@ mod tests {
     }
 
     #[test]
+    fn script_transport_waits_for_real_service_completion() {
+        let temporary = TempDir::new().unwrap();
+        let path = temporary.path().join("library.muse");
+        let mut library = muse_library::Library::open(&path).unwrap();
+        let source = temporary.path().join("silence.mp3");
+        std::fs::write(
+            &source,
+            include_bytes!("../../muse-library/tests/fixtures/silence.mp3"),
+        )
+        .unwrap();
+        let id = library.import(&source).imported;
+        assert_eq!(id, 1);
+        let track = library.list().unwrap()[0].id;
+        drop(library);
+        let _running = serve(path.clone());
+        let remote = crate::service::Remote::attach(&path).unwrap();
+        let loaded = remote
+            .call(crate::service::Command::Load(track), None)
+            .unwrap();
+        let client = Arc::new(PlaybackWorker::start(remote.clone()).unwrap());
+        client.apply(loaded);
+        let mut app = App::new(path).unwrap();
+        // Match run(): the script worker and UI share the same transport client.
+        app.scripts.attach(client.clone());
+        app.playback = Some(client);
+        app.execute_command("=pause();");
+        await_script(&mut app, |app| app.message == "Script completed");
+        let paused = remote.call(crate::service::Command::Status, None).unwrap();
+        assert_eq!(paused.status.unwrap().state, PlaybackState::Paused);
+
+        app.lyrics_following = false;
+        app.execute_command("=seek(0, unit::SEC);");
+        await_script(&mut app, |app| app.message.starts_with("Position: "));
+        assert!(app.lyrics_following);
+        assert_eq!(
+            app.playback_view.status.unwrap().state,
+            PlaybackState::Paused
+        );
+        app.lyrics_following = false;
+        app.execute_command("=seek(-1, unit::SEC);");
+        await_script(&mut app, |app| app.message.starts_with("Script error:"));
+        assert!(!app.lyrics_following);
+        app.execute_command("=seek_by(0.05, unit::SEC);");
+        await_script(&mut app, |app| app.message.starts_with("Position: "));
+        assert!(app.lyrics_following);
+        assert_eq!(
+            app.playback_view.status.unwrap().state,
+            PlaybackState::Paused
+        );
+        app.execute_command("=play(); pause();");
+        await_script(&mut app, |app| app.message == "Script completed");
+        let paused = remote.call(crate::service::Command::Status, None).unwrap();
+        assert_eq!(paused.status.unwrap().state, PlaybackState::Paused);
+        app.execute_command("=play(); unknown_operation();");
+        await_script(&mut app, |app| app.message.starts_with("Script error:"));
+        let playing = remote.call(crate::service::Command::Status, None).unwrap();
+        assert_eq!(playing.status.unwrap().state, PlaybackState::Playing);
+        app.execute_command("=pause();");
+        await_script(&mut app, |app| app.message == "Script completed");
+        let paused = remote.call(crate::service::Command::Status, None).unwrap();
+        assert_eq!(paused.status.unwrap().state, PlaybackState::Paused);
+    }
+
+    #[test]
     fn colon_transport_repaints_the_pane_through_the_attached_client() {
         let temporary = TempDir::new().unwrap();
         let path = temporary.path().join("library.muse");
@@ -4040,8 +4133,9 @@ mod tests {
         let _running = serve(path.clone());
         let mut app = App::new(path.clone()).unwrap();
         // Mirror run(): the TUI keeps an attached playback client alive.
-        app.playback =
-            Some(PlaybackWorker::start(crate::service::Remote::attach(&path).unwrap()).unwrap());
+        app.playback = Some(Arc::new(
+            PlaybackWorker::start(crate::service::Remote::attach(&path).unwrap()).unwrap(),
+        ));
         app.execute_command(&format!("play {}", ids[0]));
         assert_eq!(app.playback_view.current.unwrap().id, ids[0]);
         // Let the client's background poller observe the loaded track.

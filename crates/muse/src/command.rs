@@ -794,6 +794,51 @@ mod tests {
     }
 
     #[test]
+    fn script_marker_completes_registered_functions_and_constants() {
+        let mut function = line("=pl");
+        function
+            .complete_using(false, |_| panic!("script names must not scan paths"))
+            .unwrap();
+        assert_eq!(function.text(), "=play()");
+        assert_eq!(function.cursor(), "=play(".len());
+
+        let mut constant = line("=unit::S");
+        constant
+            .complete_using(false, |_| panic!("constants must not scan paths"))
+            .unwrap();
+        assert_eq!(constant.text(), "=unit::SEC");
+
+        let mut existing_call = line("=pl(); pause()");
+        for _ in 0.."(); pause()".len() {
+            existing_call.move_cursor(CursorMove::Left);
+        }
+        existing_call
+            .complete_using(false, |_| panic!("script names must not scan paths"))
+            .unwrap();
+        assert_eq!(existing_call.text(), "=play(); pause()");
+
+        for source in ["=\"pl", "=// pl", "=/* pl"] {
+            let mut inert = line(source);
+            inert
+                .complete_using(false, |_| panic!("script text must not scan paths"))
+                .unwrap();
+            assert_eq!(inert.text(), source);
+            assert!(inert.candidates().is_empty());
+        }
+
+        let mut prompt = line("=");
+        prompt
+            .complete_using(false, |_| panic!("script discovery must not scan paths"))
+            .unwrap();
+        assert!(
+            prompt
+                .candidates()
+                .iter()
+                .any(|candidate| candidate.label == "play()")
+        );
+    }
+
+    #[test]
     fn unsupported_name_contexts_preserve_text_cursor_and_dispatch_boundaries() {
         for text in [
             "unknown",
