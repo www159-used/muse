@@ -2391,9 +2391,10 @@ mod tests {
         let rendered = screen(&mut app, 100, 24);
         assert!(rendered.contains("Rhai"));
         assert!(rendered.contains("unit::"));
-        assert!(rendered.contains("version()"));
+        assert!(rendered.contains("seek(value, unit)"));
         app.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
         assert_eq!(app.command.as_ref().unwrap().text(), "=version()");
+        assert!(screen(&mut app, 100, 24).contains("version()"));
         assert_eq!(app.message, original_message);
         assert!(app.scripts.try_result().is_none());
         screen(&mut app, 20, 6);

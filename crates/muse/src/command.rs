@@ -681,7 +681,6 @@ mod tests {
             "=/* ver",
             "=/* outer /* nested */ ver",
             "=object.ver",
-            "=seek",
             "=unknown::S",
         ] {
             let mut input = line(source);
