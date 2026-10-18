@@ -64,6 +64,8 @@ Dependencies: phases 1, 3, and 4. Outcome: both frontends complete ordinary comm
 - [ ] 6.4 Implement stable candidate cycling from the original completion session; insert/reuse parentheses only for script functions, verifying ordinary names remain bare, common prefixes, Tab/Shift-Tab wraparound, existing delimiters, and repeated cycling without accumulation.
 - [ ] 6.5 Wire the shared mode-aware provider into the Ratatui popup and REPL editor, removing independent hard-coded candidate lists; invalidate sessions on edits/cursor movement or script-marker changes, and verify capability filtering, explicit Enter submission, Esc cancellation, and small-terminal behavior.
 
+Early TUI slice: explicit `:=` input completes currently registered application functions, constant namespaces, and qualified constants from the API descriptor tables. It preserves UTF-8 source ranges and existing parentheses, cycles from the original edit, and uses the existing popup without evaluation or filesystem discovery. This covers part of 6.2–6.5; the phase remains open for live session/catalog snapshots, registered ordinary commands, and REPL integration. Argument-specific hints and script paths remain in phase 7.
+
 ## 7. Command editing, completion hints, history, and repeat
 
 Dependencies: phases 2, 4, and 6. Outcome: incomplete calls receive contextual completion; both frontends share readline-style editing/history, and the TUI can repeat its latest successful command.

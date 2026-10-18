@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+mod completion;
+
 use std::{
     fs, io,
     path::{MAIN_SEPARATOR, Path, PathBuf},
@@ -98,43 +100,6 @@ pub fn script_body(input: &str) -> Option<&str> {
         .map(str::trim)
 }
 
-fn script_in_string_or_comment(source: &str) -> bool {
-    let mut chars = source.chars().peekable();
-    let mut quote = false;
-    let mut escaped = false;
-    let mut line_comment = false;
-    let mut block_comment = false;
-    while let Some(ch) = chars.next() {
-        if line_comment {
-            if ch == '\n' {
-                line_comment = false;
-            }
-        } else if block_comment {
-            if ch == '*' && chars.peek() == Some(&'/') {
-                chars.next();
-                block_comment = false;
-            }
-        } else if quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                quote = false;
-            }
-        } else if ch == '"' {
-            quote = true;
-        } else if ch == '/' && chars.peek() == Some(&'/') {
-            line_comment = true;
-            chars.next();
-        } else if ch == '/' && chars.peek() == Some(&'*') {
-            block_comment = true;
-            chars.next();
-        }
-    }
-    quote || line_comment || block_comment
-}
-
 /// A command line that is only a positive row number, used for navigation.
 pub fn decimal_line(input: &str) -> Option<usize> {
     if input.is_empty() || !input.bytes().all(|digit| digit.is_ascii_digit()) {
@@ -169,8 +134,8 @@ struct Completion {
 
 enum CompletionTarget {
     Commands { prefix: String },
-    Script { prefix: String, suffix: String },
     Paths(PathArgument),
+    Script(completion::Edit),
 }
 
 struct PathArgument {
@@ -218,7 +183,7 @@ impl CommandLine {
             .map(|completion| &completion.target)
         {
             Some(CompletionTarget::Commands { .. }) => "Commands",
-            Some(CompletionTarget::Script { .. }) => "Script",
+            Some(CompletionTarget::Script(_)) => "Rhai",
             _ => "Paths",
         }
     }
@@ -291,62 +256,23 @@ impl CommandLine {
             self.completion = Some(completion);
             return Ok(());
         }
-        let (target, candidates) = if self.text.trim_start().starts_with(SCRIPT_MARKER) {
-            let marker = self.text.len() - self.text.trim_start().len();
-            let body_start = marker + SCRIPT_MARKER.len_utf8();
-            if self.cursor < body_start {
+        let (target, candidates) = if classify(&self.text) == CommandForm::Script {
+            // REPL script execution arrives in phase 4; do not advertise it yet.
+            if self.repl {
                 return Ok(());
             }
-            let before = &self.text[body_start..self.cursor];
-            if script_in_string_or_comment(before) {
+            let Some((edit, suggestions)) = completion::candidates(&self.text, self.cursor) else {
                 return Ok(());
-            }
-            let token_start = before
-                .char_indices()
-                .rev()
-                .find(|(_, ch)| !ch.is_ascii_alphanumeric() && *ch != '_' && *ch != ':')
-                .map_or(body_start, |(offset, ch)| {
-                    body_start + offset + ch.len_utf8()
-                });
-            let name = &self.text[token_start..self.cursor];
-            let token_tail = self.text[self.cursor..]
-                .find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != ':')
-                .unwrap_or(self.text.len() - self.cursor);
-            let mut candidates: Vec<Candidate> = crate::scripting::api::FUNCTIONS
-                .iter()
-                .filter(|function| function.name.starts_with(name))
-                .map(|function| Candidate {
-                    label: format!("{}()", function.name),
-                    value: function.name.to_owned(),
+            };
+            let candidates = suggestions
+                .into_iter()
+                .map(|suggestion| Candidate {
+                    label: suggestion.label,
+                    value: suggestion.insertion,
                     directory: false,
                 })
                 .collect();
-            if "unit::".starts_with(name) {
-                candidates.push(Candidate {
-                    label: "unit::".into(),
-                    value: "unit::".into(),
-                    directory: false,
-                });
-            }
-            candidates.extend(
-                crate::scripting::api::CONSTANTS
-                    .iter()
-                    .filter_map(|constant| {
-                        let qualified = constant.qualified_name();
-                        qualified.starts_with(name).then(|| Candidate {
-                            label: qualified.clone(),
-                            value: qualified,
-                            directory: false,
-                        })
-                    }),
-            );
-            (
-                CompletionTarget::Script {
-                    prefix: self.text[..token_start].to_owned(),
-                    suffix: self.text[self.cursor + token_tail..].to_owned(),
-                },
-                candidates,
-            )
+            (CompletionTarget::Script(edit), candidates)
         } else if let Some(argument) = import_argument(&self.text, self.cursor) {
             let candidates = paths(&argument.path)?;
             (CompletionTarget::Paths(argument), candidates)
@@ -415,13 +341,8 @@ impl CommandLine {
                 self.cursor = self.text.len();
                 return;
             }
-            CompletionTarget::Script { prefix, suffix } => {
-                let function = crate::scripting::api::FUNCTIONS
-                    .iter()
-                    .any(|function| function.name == value);
-                let call = function && !suffix.starts_with('(');
-                self.text = format!("{prefix}{value}{}{suffix}", if call { "()" } else { "" });
-                self.cursor = prefix.len() + value.len() + usize::from(call);
+            CompletionTarget::Script(edit) => {
+                (self.text, self.cursor) = edit.apply(value);
                 return;
             }
             CompletionTarget::Paths(argument) => argument,
@@ -663,6 +584,130 @@ mod tests {
             completion: None,
             repl: false,
         }
+    }
+
+    fn complete_script(input: &mut CommandLine, reverse: bool) {
+        input
+            .complete_using(reverse, |_| panic!("script symbols must not scan paths"))
+            .unwrap();
+    }
+
+    #[test]
+    fn script_completion_discovers_registered_functions_and_namespaces() {
+        let mut input = line("  =  ");
+        complete_script(&mut input, false);
+        assert_eq!(input.text(), "  =  ");
+        assert_eq!(input.completion_title(), "Rhai");
+        let choices: Vec<_> = input.candidates().iter().map(|c| c.value.clone()).collect();
+        assert!(choices.iter().any(|value| value == "unit::"));
+        for function in crate::scripting::api::FUNCTIONS {
+            assert!(choices.contains(&format!("{}()", function.name)));
+        }
+        assert!(!choices.iter().any(|value| value == "quit"));
+        // Traverse every registered candidate twice, then reverse across the
+        // wrap boundary. Adding host APIs must not require another name list.
+        for expected in choices.iter().cycle().take(choices.len() * 2 + 1) {
+            complete_script(&mut input, false);
+            assert_eq!(input.text(), format!("  =  {expected}"));
+        }
+        complete_script(&mut input, true);
+        assert_eq!(input.text(), format!("  =  {}", choices.last().unwrap()));
+        input.move_cursor(CursorMove::Left);
+        assert!(input.candidates().is_empty());
+    }
+
+    #[test]
+    fn script_completion_uses_registered_units_and_stable_reverse_cycling() {
+        let mut input = line("=unit::");
+        complete_script(&mut input, false);
+        let mut expected: Vec<_> = crate::scripting::api::CONSTANTS
+            .iter()
+            .map(|c| c.qualified_name())
+            .collect();
+        expected.sort();
+        assert_eq!(
+            input
+                .candidates()
+                .iter()
+                .map(|c| c.label.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        complete_script(&mut input, true);
+        assert_eq!(input.text(), "=unit::SEC");
+        complete_script(&mut input, false);
+        assert_eq!(input.text(), "=unit::HOUR");
+        complete_script(&mut input, true);
+        assert_eq!(input.text(), "=unit::SEC");
+        input.insert(';');
+        assert!(input.candidates().is_empty());
+    }
+
+    #[test]
+    fn script_completion_preserves_unicode_prefix_suffix_and_existing_parentheses() {
+        for (source, token, expected, cursor_prefix) in [
+            (
+                "  =let 名 = 1; ver; 名",
+                "ver",
+                "  =let 名 = 1; version(); 名",
+                "  =let 名 = 1; version(",
+            ),
+            ("=ver (); 23", "ver", "=version (); 23", "=version ("),
+            ("=version(); 23", "ver", "=version(); 23", "=version("),
+            (
+                "=fn f(x) { x }; f(unit::S); 23",
+                "unit::S",
+                "=fn f(x) { x }; f(unit::SEC); 23",
+                "=fn f(x) { x }; f(unit::SEC",
+            ),
+        ] {
+            let mut input = line(source);
+            input.cursor = source.find(token).unwrap() + token.len();
+            complete_script(&mut input, false);
+            assert_eq!(input.text(), expected);
+            assert_eq!(input.cursor(), cursor_prefix.len());
+            assert!(input.text().is_char_boundary(input.cursor()));
+        }
+    }
+
+    #[test]
+    fn script_completion_leaves_literals_comments_and_unsupported_symbols_alone() {
+        for source in [
+            "=print(\"ver",
+            "=print(\"a\\\"ver",
+            "='v",
+            "=`ver",
+            "=// ver",
+            "=/* ver",
+            "=/* outer /* nested */ ver",
+            "=object.ver",
+            "=unknown::S",
+        ] {
+            let mut input = line(source);
+            complete_script(&mut input, false);
+            assert_eq!(input.text(), source);
+            assert!(input.candidates().is_empty());
+        }
+        let mut input = line("=/* nested /* comment */ done */ ver");
+        complete_script(&mut input, false);
+        assert_eq!(input.text(), "=/* nested /* comment */ done */ version()");
+    }
+
+    #[test]
+    fn script_completion_does_not_leak_into_ordinary_or_repl_input() {
+        let mut ordinary = line("ver");
+        complete_script(&mut ordinary, false);
+        assert_eq!(ordinary.text(), "ver");
+        assert!(ordinary.candidates().is_empty());
+        let mut repl = CommandLine::for_repl();
+        repl.replace("=ver");
+        complete_script(&mut repl, false);
+        assert_eq!(repl.text(), "=ver");
+        assert!(repl.candidates().is_empty());
+        let mut input = line("=ver");
+        input.move_cursor(CursorMove::Start);
+        complete_script(&mut input, false);
+        assert_eq!(input.text(), "=ver");
     }
 
     #[test]

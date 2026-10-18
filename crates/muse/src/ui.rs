@@ -2382,6 +2382,42 @@ mod tests {
     }
 
     #[test]
+    fn script_tab_displays_candidates_and_waits_for_enter_to_execute() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = navigation_app(temporary.path().join("library.muse"), 12);
+        let original_message = app.message.clone();
+        type_command(&mut app, "=");
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let rendered = screen(&mut app, 100, 24);
+        assert!(rendered.contains("Rhai"));
+        assert!(rendered.contains("unit::"));
+        assert!(rendered.contains("seek(value, unit)"));
+        app.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(app.command.as_ref().unwrap().text(), "=version()");
+        assert!(screen(&mut app, 100, 24).contains("version()"));
+        assert_eq!(app.message, original_message);
+        assert!(app.scripts.try_result().is_none());
+        screen(&mut app, 20, 6);
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let version = format!("muse {}", env!("CARGO_PKG_VERSION"));
+        await_script(&mut app, |app| app.message == version);
+    }
+
+    #[test]
+    fn script_unit_completion_cancels_without_execution() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = navigation_app(temporary.path().join("library.muse"), 12);
+        let original_message = app.message.clone();
+        type_command(&mut app, "=unit::S");
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.command.as_ref().unwrap().text(), "=unit::SEC");
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.command.is_none());
+        assert_eq!(app.message, original_message);
+        assert!(app.scripts.try_result().is_none());
+    }
+
+    #[test]
     fn script_input_is_evaluated_off_the_ui_thread_and_reports_its_value() {
         let temporary = TempDir::new().unwrap();
         let mut app = navigation_app(temporary.path().join("library.muse"), 12);
