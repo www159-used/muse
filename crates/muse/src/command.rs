@@ -98,6 +98,43 @@ pub fn script_body(input: &str) -> Option<&str> {
         .map(str::trim)
 }
 
+fn script_in_string_or_comment(source: &str) -> bool {
+    let mut chars = source.chars().peekable();
+    let mut quote = false;
+    let mut escaped = false;
+    let mut line_comment = false;
+    let mut block_comment = false;
+    while let Some(ch) = chars.next() {
+        if line_comment {
+            if ch == '\n' {
+                line_comment = false;
+            }
+        } else if block_comment {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                block_comment = false;
+            }
+        } else if quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                quote = false;
+            }
+        } else if ch == '"' {
+            quote = true;
+        } else if ch == '/' && chars.peek() == Some(&'/') {
+            line_comment = true;
+            chars.next();
+        } else if ch == '/' && chars.peek() == Some(&'*') {
+            block_comment = true;
+            chars.next();
+        }
+    }
+    quote || line_comment || block_comment
+}
+
 /// A command line that is only a positive row number, used for navigation.
 pub fn decimal_line(input: &str) -> Option<usize> {
     if input.is_empty() || !input.bytes().all(|digit| digit.is_ascii_digit()) {
@@ -132,6 +169,7 @@ struct Completion {
 
 enum CompletionTarget {
     Commands { prefix: String },
+    Script { prefix: String, suffix: String },
     Paths(PathArgument),
 }
 
@@ -180,6 +218,7 @@ impl CommandLine {
             .map(|completion| &completion.target)
         {
             Some(CompletionTarget::Commands { .. }) => "Commands",
+            Some(CompletionTarget::Script { .. }) => "Script",
             _ => "Paths",
         }
     }
@@ -252,8 +291,63 @@ impl CommandLine {
             self.completion = Some(completion);
             return Ok(());
         }
-        let (target, candidates) = if let Some(argument) = import_argument(&self.text, self.cursor)
-        {
+        let (target, candidates) = if self.text.trim_start().starts_with(SCRIPT_MARKER) {
+            let marker = self.text.len() - self.text.trim_start().len();
+            let body_start = marker + SCRIPT_MARKER.len_utf8();
+            if self.cursor < body_start {
+                return Ok(());
+            }
+            let before = &self.text[body_start..self.cursor];
+            if script_in_string_or_comment(before) {
+                return Ok(());
+            }
+            let token_start = before
+                .char_indices()
+                .rev()
+                .find(|(_, ch)| !ch.is_ascii_alphanumeric() && *ch != '_' && *ch != ':')
+                .map_or(body_start, |(offset, ch)| {
+                    body_start + offset + ch.len_utf8()
+                });
+            let name = &self.text[token_start..self.cursor];
+            let token_tail = self.text[self.cursor..]
+                .find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != ':')
+                .unwrap_or(self.text.len() - self.cursor);
+            let mut candidates: Vec<Candidate> = crate::scripting::api::FUNCTIONS
+                .iter()
+                .filter(|function| function.name.starts_with(name))
+                .map(|function| Candidate {
+                    label: format!("{}()", function.name),
+                    value: function.name.to_owned(),
+                    directory: false,
+                })
+                .collect();
+            if "unit::".starts_with(name) {
+                candidates.push(Candidate {
+                    label: "unit::".into(),
+                    value: "unit::".into(),
+                    directory: false,
+                });
+            }
+            candidates.extend(
+                crate::scripting::api::CONSTANTS
+                    .iter()
+                    .filter_map(|constant| {
+                        let qualified = constant.qualified_name();
+                        qualified.starts_with(name).then(|| Candidate {
+                            label: qualified.clone(),
+                            value: qualified,
+                            directory: false,
+                        })
+                    }),
+            );
+            (
+                CompletionTarget::Script {
+                    prefix: self.text[..token_start].to_owned(),
+                    suffix: self.text[self.cursor + token_tail..].to_owned(),
+                },
+                candidates,
+            )
+        } else if let Some(argument) = import_argument(&self.text, self.cursor) {
             let candidates = paths(&argument.path)?;
             (CompletionTarget::Paths(argument), candidates)
         } else if self.cursor == self.text.len()
@@ -319,6 +413,15 @@ impl CommandLine {
             CompletionTarget::Commands { prefix } => {
                 self.text = format!("{prefix}{value}");
                 self.cursor = self.text.len();
+                return;
+            }
+            CompletionTarget::Script { prefix, suffix } => {
+                let function = crate::scripting::api::FUNCTIONS
+                    .iter()
+                    .any(|function| function.name == value);
+                let call = function && !suffix.starts_with('(');
+                self.text = format!("{prefix}{value}{}{suffix}", if call { "()" } else { "" });
+                self.cursor = prefix.len() + value.len() + usize::from(call);
                 return;
             }
             CompletionTarget::Paths(argument) => argument,
@@ -642,6 +745,51 @@ mod tests {
         let mut reverse = line("");
         complete(&mut reverse, true);
         assert_eq!(reverse.text(), "volume");
+    }
+
+    #[test]
+    fn script_marker_completes_registered_functions_and_constants() {
+        let mut function = line("=pl");
+        function
+            .complete_using(false, |_| panic!("script names must not scan paths"))
+            .unwrap();
+        assert_eq!(function.text(), "=play()");
+        assert_eq!(function.cursor(), "=play(".len());
+
+        let mut constant = line("=unit::S");
+        constant
+            .complete_using(false, |_| panic!("constants must not scan paths"))
+            .unwrap();
+        assert_eq!(constant.text(), "=unit::SEC");
+
+        let mut existing_call = line("=pl(); pause()");
+        for _ in 0.."(); pause()".len() {
+            existing_call.move_cursor(CursorMove::Left);
+        }
+        existing_call
+            .complete_using(false, |_| panic!("script names must not scan paths"))
+            .unwrap();
+        assert_eq!(existing_call.text(), "=play(); pause()");
+
+        for source in ["=\"pl", "=// pl", "=/* pl"] {
+            let mut inert = line(source);
+            inert
+                .complete_using(false, |_| panic!("script text must not scan paths"))
+                .unwrap();
+            assert_eq!(inert.text(), source);
+            assert!(inert.candidates().is_empty());
+        }
+
+        let mut prompt = line("=");
+        prompt
+            .complete_using(false, |_| panic!("script discovery must not scan paths"))
+            .unwrap();
+        assert!(
+            prompt
+                .candidates()
+                .iter()
+                .any(|candidate| candidate.label == "play()")
+        );
     }
 
     #[test]

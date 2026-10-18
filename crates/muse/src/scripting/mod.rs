@@ -13,6 +13,7 @@
 //! scripts lives with the command line it belongs to, in [`crate::command`].
 
 pub mod api;
+pub mod host;
 pub mod session;
 pub mod worker;
 
