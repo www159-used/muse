@@ -2454,6 +2454,28 @@ mod tests {
     }
 
     #[test]
+    fn script_output_does_not_hide_the_final_result_in_the_status_row() {
+        let temporary = TempDir::new().unwrap();
+        let mut app = navigation_app(temporary.path().join("library.muse"), 12);
+        for (source, expected) in [
+            ("=print(\"before\"); unknown_operation();", "Script error:"),
+            ("=debug(\"before\"); 424242", "424242"),
+        ] {
+            app.execute_command(source);
+            await_script(&mut app, |app| app.message.contains(expected));
+            assert!(
+                app.message.contains("before"),
+                "captured output is retained"
+            );
+            let rendered = screen(&mut app, 160, 24);
+            assert!(
+                rendered.contains(expected),
+                "final script outcome {expected:?} is hidden:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
     fn quit_remains_responsive_during_a_pending_script() {
         let temporary = TempDir::new().unwrap();
         let mut app = navigation_app(temporary.path().join("library.muse"), 1);

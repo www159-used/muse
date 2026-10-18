@@ -6,7 +6,7 @@ Dependencies: none. Outcome: `:=` evaluates a registered function without blocki
 
 - [x] 1.1 Add Rhai with metadata support only to the application crate and establish the scripting module boundary; verify the playback crate still checks with no default features and no scripting dependency.
 - [x] 1.2 Introduce a shared API descriptor/registration entry containing names, parameter/return metadata, documentation, constants, and completion annotations; verify a registered function is callable and appears in the descriptor catalog.
-- [x] 1.3 Create the serialized script worker and bounded request/result messages; route Rhai input through it and surface an evaluated value or English error without blocking the TUI event loop.
+- [x] 1.3 Create the serialized script worker and bounded request/result messages; route Rhai input through it and surface an evaluated value or English error without blocking the TUI event loop. Verify on the rendered status row that preceding print/debug output cannot hide the final value or error.
 - [x] 1.4 Retain session scope and compiled script functions across prompt submissions; verify a function defined in one submission remains callable in a later one, while a parse failure publishes no new definitions.
 - [x] 1.5 Route only `:=` input to Rhai by stripping its leading marker; keep ordinary commands and numeric navigation on their current path until phase 4 registers their callbacks. Verify `:play`, `:=play()`, `:23`, `:=23`, and malformed input take only their selected path without error-triggered fallback.
 

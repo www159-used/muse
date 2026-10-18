@@ -136,10 +136,13 @@ impl Session {
         if output.is_empty() {
             return result;
         }
+        // The current status renderer has one row. Put the final outcome first
+        // so captured print/debug output cannot hide a value or runtime error.
+        // Retain the output after it for consumers that can show multiple lines.
         match result {
             Evaluation::Value(value) if value.is_empty() => Evaluation::Value(output),
-            Evaluation::Value(value) => Evaluation::Value(format!("{output}\n{value}")),
-            Evaluation::Error(error) => Evaluation::Error(format!("{output}\n{error}")),
+            Evaluation::Value(value) => Evaluation::Value(format!("{value}\n{output}")),
+            Evaluation::Error(error) => Evaluation::Error(format!("{error}\n{output}")),
         }
     }
 }
